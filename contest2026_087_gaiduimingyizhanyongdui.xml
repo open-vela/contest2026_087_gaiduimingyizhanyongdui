@@ -1,0 +1,16 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<manifest>
+  <!--
+    Team repo manifest. Includes the full openvela base project set
+    (openvela.xml in this same repo) and adds this team repo as a self-ref
+    project, exposing its work-form subdirectories to openvela working-tree
+    locations via <linkfile>. remote/default come from the included openvela.xml.
+  -->
+  <include name="openvela.xml"/>
+
+  <project path="contest2026_087_gaiduimingyizhanyongdui" name="contest2026_087_gaiduimingyizhanyongdui">
+    <linkfile src="app/hello_app" dest="packages/demos/contest2026_087_hello_app"/>
+    <linkfile src="quickapp/hello_quickapp" dest="packages/apps/contest2026_087_hello_quickapp"/>
+    <linkfile src="board/contest_board" dest="vendor/openvela/boards/contest2026_087_board"/>
+  </project>
+</manifest>

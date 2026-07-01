@@ -1,0 +1,16 @@
+name: cla
+
+# CLA-only signature verification on pull requests.
+# No code checkout, no build, no CI. Calls the shared reusable CLA workflow.
+# Produces commit status context: cla/signature
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created]
+
+jobs:
+  cla:
+    if: github.event_name == 'pull_request_target' || (github.event.issue.pull_request && contains(github.event.comment.body, '/check-cla'))
+    uses: open-vela/public-actions/.github/workflows/cla.yml@dev
+    secrets: inherit
