@@ -1,0 +1,7 @@
+############################################################################
+# Contest 2026 team 087 Focus AIoT application
+############################################################################
+
+ifneq ($(CONFIG_CONTEST2026_087_FOCUS_AIOT),)
+CONFIGURED_APPS += $(APPDIR)/packages/demos/contest2026_087_focus_aiot
+endif

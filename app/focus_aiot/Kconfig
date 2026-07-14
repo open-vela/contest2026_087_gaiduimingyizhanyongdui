@@ -1,0 +1,5 @@
+config CONTEST2026_087_FOCUS_AIOT
+	bool "Contest 2026 team 087 Focus AIoT UI"
+	default n
+	---help---
+		Enable the Focus AIoT study-monitor UI and MiMo advice adapter.

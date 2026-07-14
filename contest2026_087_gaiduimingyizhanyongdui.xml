@@ -9,8 +9,6 @@
   <include name="openvela.xml"/>
 
   <project path="contest2026_087_gaiduimingyizhanyongdui" name="contest2026_087_gaiduimingyizhanyongdui">
-    <linkfile src="app/hello_app" dest="packages/demos/contest2026_087_hello_app"/>
-    <linkfile src="quickapp/hello_quickapp" dest="packages/apps/contest2026_087_hello_quickapp"/>
-    <linkfile src="board/contest_board" dest="vendor/openvela/boards/contest2026_087_board"/>
+    <linkfile src="app/focus_aiot" dest="packages/demos/contest2026_087_focus_aiot"/>
   </project>
 </manifest>

@@ -1,0 +1,17 @@
+# Build outputs
+build/
+out/
+*.o
+*.a
+*.elf
+*.hex
+*.map
+
+# Local tools and secrets
+.vscode/
+.idea/
+*.user
+.env
+.env.*
+
+# AI Coding logs under logs/ are intentionally not ignored.
