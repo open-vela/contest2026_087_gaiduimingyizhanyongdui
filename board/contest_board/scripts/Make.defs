@@ -1,0 +1,10 @@
+############################################################################
+# contest2026_087_board - 板级构建适配 (scripts/Make.defs)
+#
+# 本队板卡硬件即为 ESP32-S3-EYE（见 defconfig 中的
+# CONFIG_ARCH_BOARD_CUSTOM_DIR 指向官方 esp32s3-eye 板）。
+# 编译链接所需的工具链/链接脚本配置直接复用官方 esp32s3-eye 板的
+# scripts/Make.defs，避免复制维护两份。
+############################################################################
+
+include $(TOPDIR)/../vendor/espressif/boards/esp32s3/esp32s3-eye/scripts/Make.defs
