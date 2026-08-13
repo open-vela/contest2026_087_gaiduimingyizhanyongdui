@@ -135,43 +135,109 @@ int mock_mimo_get_advice(const session_stats_t *stats,
     return FOCUS_OK;
 }
 
-/* ---- Mock 状态机 ---- */
+/* ---- Mock 按键 (张沐泽接口的占位实现) ---- */
 
-#include "../api/state_machine.h"
+#include "../api/button.h"
 
-static device_status_t g_mock_device_status = DEVICE_IDLE;
+static int g_mock_btn_tick = 0;
 
-void state_machine_init(void)
+button_event_t button_get_event(void)
 {
-    g_mock_device_status = DEVICE_IDLE;
-    printf("[state_machine] init -> IDLE\n");
+    /* 模拟按键序列: 让 FSM 走完一次完整学习流程。
+     * 真实实现由张沐泽提供 (GPIO 中断 + 长短按判定)。 */
+    button_event_t ev = BTN_NONE;
+    g_mock_btn_tick++;
+
+    switch (g_mock_btn_tick)
+      {
+        case 5:   ev = BTN_START_LONGPRESS;  break;  /* 进入模式选择 */
+        case 10:  ev = BTN_START_SHORT;      break;  /* 确认，开始学习 */
+        case 50:  ev = BTN_PAUSE_SHORT;      break;  /* 暂停 */
+        case 60:  ev = BTN_PAUSE_SHORT;      break;  /* 恢复 */
+        case 100: ev = BTN_PAUSE_LONGPRESS;  break;  /* 停止 → 报告 */
+        case 110: ev = BTN_START_SHORT;      break;  /* 返回 IDLE */
+        default:  ev = BTN_NONE;             break;
+      }
+
+    return ev;
 }
 
-device_status_t state_machine_get_status(void)
+/* ---- Mock 行为分析 (赵思涵接口的占位实现) ---- */
+
+void behavior_set_mode(int mode)
 {
-    return g_mock_device_status;
+    (void)mode;
+    printf("[behavior/mock] set_mode -> %s\n",
+           mode == MODE_GENTLE ? "GENTLE" : "STRICT");
 }
 
-const session_stats_t *state_machine_get_stats(void)
+/* behavior_analyze(): 每 tick 调用一次, 轮转输出 study_state。
+ * 真实实现由赵思涵提供 (消费 perception_get_history 做时序分析)。
+ *
+ * mock 模拟真实行为的冷却逻辑: 每个状态持续 ~1 秒 (10 tick),
+ * 但 REMIND 只在进入该状态的第一 tick 触发, 后续 tick 返回 FOCUSED,
+ * 避免同一分心被重复计数。真实冷却由赵思涵的 remind_cooldown_sec 保证。 */
+study_state_t behavior_analyze(void)
 {
-    static session_stats_t stats;
-    memset(&stats, 0, sizeof(stats));
-    return &stats;
+    static int call         = 0;
+    static int idx          = 0;
+    static int tick_in_state = 0;
+    static const study_state_t seq[] = {
+        {FOCUSED,       NONE,     "",                false, 0, 0},
+        {PLAYING_PHONE, REMIND,   "请放下手机!",     false, 0, -15},
+        {FOCUSED,       NONE,     "",                false, 0, 0},
+        {AWAY,          REMIND,   "请回到座位!",     false, 0, -10},
+        {FOCUSED,       NONE,     "",                false, 0, 0},
+        {DROWSY,        REMIND,   "请注意坐姿!",     false, 0, -20},
+        {FOCUSED,       NONE,     "",                false, 0, 0},
+    };
+    const int SEQ_N = (int)(sizeof(seq) / sizeof(seq[0]));
+    study_state_t s;
+
+    call++;
+    tick_in_state++;
+
+    /* 每 10 tick (约 1 秒) 轮转到下一个状态 */
+    if ((call % 10) == 0)
+      {
+        idx = (idx + 1) % SEQ_N;
+        tick_in_state = 0;
+      }
+
+    s = seq[idx];
+
+    /* 冷却模拟: REMIND 只在进入状态的第一 tick 返回, 其余返回 FOCUSED */
+    if (s.action == REMIND && tick_in_state > 0)
+      {
+        s.status           = FOCUSED;
+        s.action           = NONE;
+        s.message[0]       = '\0';
+        s.focus_score_delta = 0;
+      }
+
+    return s;
 }
 
-int state_machine_get_mode(void)
+/* ---- Mock 音频 (张沐泽接口的占位实现) ---- */
+
+#include "../api/audio.h"
+
+int audio_play_tts(const char *text)
 {
-    return MODE_STRICT;
+    printf("[audio/mock/TTS] %s\n", text ? text : "");
+    return FOCUS_OK;
 }
 
-bool state_machine_is_paused(void)
+void audio_play_buzzer(int pattern)
 {
-    return false;
+    printf("[audio/mock/buzzer] pattern=%d\n", pattern);
 }
 
-void state_machine_tick(void)
+int audio_play_pcm(const uint8_t *data, size_t len)
 {
-    /* MVP mock: no-op */
+    (void)data;
+    (void)len;
+    return FOCUS_OK;
 }
 
 /* ---- Mock 摄像头 ---- */
