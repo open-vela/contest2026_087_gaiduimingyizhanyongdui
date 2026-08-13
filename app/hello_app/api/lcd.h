@@ -17,15 +17,12 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "behavior.h"
+#include "session.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ---- 前向声明 (避免循环引用) ---- */
-typedef enum   device_status_e  device_status_t;
-typedef struct session_stats_s  session_stats_t;
-typedef struct session_report_s session_report_t;
-typedef enum   action_e         action_t;
 
 /* ---- 张沐泽 底层驱动接口 ---- */
 

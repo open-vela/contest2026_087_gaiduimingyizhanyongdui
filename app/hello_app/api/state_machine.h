@@ -19,7 +19,7 @@ extern "C" {
 
 /* ---- 设备状态 (4 状态 FSM) ---- */
 
-typedef enum {
+typedef enum device_status_e {
     DEVICE_IDLE,          /* 待机                    */
     DEVICE_MODE_SELECT,   /* 选择模式 (严格/鼓励)    */
     DEVICE_MONITORING,    /* 监测中                  */
@@ -28,7 +28,7 @@ typedef enum {
 
 /* ---- 会话统计数据 ---- */
 
-typedef struct {
+typedef struct session_stats_s {
     uint32_t session_start;          /* 学习开始时间戳 (ms)     */
     uint32_t total_duration_sec;     /* 总时长 (秒)             */
     uint32_t effective_duration_sec; /* 有效学习时长 (秒)       */

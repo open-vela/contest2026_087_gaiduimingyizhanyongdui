@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "api/error.h"
+#include "api/lcd.h"
 #include "api/perception.h"
 #include "api/behavior.h"
 #include "api/state_machine.h"
@@ -111,6 +112,9 @@ static study_state_t behavior_analyze_from_obs(const observation_t *obs)
 
 static void init_modules(void)
 {
+    session_stats_t initial_stats;
+    study_state_t initial_study;
+
     printf("[perception] init (mock mode)\n");
     mock_perception_init();
 
@@ -118,6 +122,26 @@ static void init_modules(void)
     g_cfg          = &g_mode_configs[MODE_STRICT];
     printf("[behavior]  init mode=STRICT\n");
     mock_behavior_init();
+
+    if (lcd_init() == FOCUS_OK)
+    {
+        memset(&initial_stats, 0, sizeof(initial_stats));
+        memset(&initial_study, 0, sizeof(initial_study));
+        initial_study.status = FOCUSED;
+        if (lcd_show_status(DEVICE_IDLE, &initial_stats,
+                            &initial_study) == FOCUS_OK)
+        {
+            printf("[ui]        LCD UI initialized\n");
+        }
+        else
+        {
+            printf("[ui]        LCD UI unavailable\n");
+        }
+    }
+    else
+    {
+        printf("[ui]        LCD backend unavailable\n");
+    }
 }
 
 /* ==================== 主事件循环 ==================== */
@@ -130,17 +154,24 @@ static void run_mock_event_loop(void)
 {
     int tick = 0;
     static const observation_t fake_frames[] = {
-        /* person phone near_hand pitch motion conf */
-        { true,  {0}, false, false, -5.0f,  0.0f,  0.1f, 0.95f, 0 },
-        { true,  {0}, false, false, -8.0f,  0.0f,  0.1f, 0.93f, 0 },
-        { true,  {0}, true,  true, -15.0f,  0.0f,  0.5f, 0.88f, 0 },
-        { true,  {0}, true,  true, -20.0f,  0.0f,  0.7f, 0.85f, 0 },
-        { false, {0}, false, false,  0.0f,   0.0f,  0.0f, 0.90f, 0 },
-        { false, {0}, false, false,  0.0f,   0.0f,  0.0f, 0.92f, 0 },
-        { true,  {0}, false, false,  35.0f,  0.0f,  0.05f, 0.80f, 0 },
-        { true,  {0}, false, false,  52.0f,  0.0f,  0.05f, 0.78f, 0 },
-        { true,  {0}, false, false, -3.0f,  0.0f,  0.15f, 0.96f, 0 },
-        { true,  {0}, false, false, -5.0f,  0.0f,  0.10f, 0.94f, 0 },
+        {.person_present=true, .head_pitch=-5.0f,
+         .hand_motion_score=0.1f, .confidence=0.95f},
+        {.person_present=true, .head_pitch=-8.0f,
+         .hand_motion_score=0.1f, .confidence=0.93f},
+        {.person_present=true, .phone_detected=true, .phone_near_hand=true,
+         .head_pitch=-15.0f, .hand_motion_score=0.5f, .confidence=0.88f},
+        {.person_present=true, .phone_detected=true, .phone_near_hand=true,
+         .head_pitch=-20.0f, .hand_motion_score=0.7f, .confidence=0.85f},
+        {.person_present=false, .confidence=0.90f},
+        {.person_present=false, .confidence=0.92f},
+        {.person_present=true, .head_pitch=35.0f,
+         .hand_motion_score=0.05f, .confidence=0.80f},
+        {.person_present=true, .head_pitch=52.0f,
+         .hand_motion_score=0.05f, .confidence=0.78f},
+        {.person_present=true, .head_pitch=-3.0f,
+         .hand_motion_score=0.15f, .confidence=0.96f},
+        {.person_present=true, .head_pitch=-5.0f,
+         .hand_motion_score=0.10f, .confidence=0.94f},
     };
     const int FAKE_COUNT = sizeof(fake_frames) / sizeof(fake_frames[0]);
 
@@ -176,6 +207,19 @@ static void run_mock_event_loop(void)
                    (int)ss.status, (int)ss.action, ss.focus_score_delta,
                    ss.milestone_reached, ss.milestone_minutes,
                    ss.message);
+
+            session_stats_t ui_stats;
+            memset(&ui_stats, 0, sizeof(ui_stats));
+            ui_stats.total_duration_sec = (uint32_t)tick;
+            ui_stats.effective_duration_sec = (uint32_t)tick;
+            ui_stats.distraction_count = ss.action == REMIND ? 1 : 0;
+            ui_stats.focus_score = ss.action == REMIND ? 80 : 100;
+            ui_stats.current_mode = (uint8_t)g_current_mode;
+            (void)lcd_show_status(DEVICE_MONITORING, &ui_stats, &ss);
+            if (ss.action != NONE && ss.message[0] != '\0')
+            {
+                (void)lcd_show_message(ss.message, ss.action);
+            }
 
             /* ---- state_machine: 消费 study_state ---- */
             if (ss.action == REMIND)
@@ -219,6 +263,8 @@ static void run_mock_event_loop(void)
 
 int main(int argc, char *argv[])
 {
+    (void)argc;
+    (void)argv;
     printf("\n");
     printf("==================================================\n");
     printf("  FOCUS AIoT v0.1 (MVP 骨架)\n");
