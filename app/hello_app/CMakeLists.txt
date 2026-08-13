@@ -3,6 +3,7 @@ if(CONFIG_LVX_USE_DEMO_CONTEST2026_087_HELLO_APP)
   set(FOCUS_AIOT_SRCS
       hello_app_main.c
       core/mock.c
+      core/state_machine.c
       ui/lcd.c
       ui/lcd_icons.c
       ui/mimo.c
