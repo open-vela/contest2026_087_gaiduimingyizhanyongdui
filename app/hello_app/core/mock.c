@@ -16,12 +16,16 @@
 
 static int g_mock_obs_index = 0;
 static const observation_t g_mock_obs_sequence[] = {
-    /* person phone near_hand pitch yaw motion conf */
-    { true,  {0}, false, false, -5.0f,  0.0f, 0.1f, 0.95f, 1000 },
-    { true,  {0}, true,  true, -20.0f,  0.0f, 0.7f, 0.85f, 6000 },
-    { false, {0}, false, false,  0.0f,  0.0f, 0.0f, 0.90f, 11000 },
-    { true,  {0}, false, false, 48.0f,  0.0f, 0.05f, 0.78f, 16000 },
-    { true,  {0}, false, false, -3.0f,  0.0f, 0.1f, 0.96f, 21000 },
+    {.person_present=true, .head_pitch=-5.0f, .hand_motion_score=0.1f,
+     .confidence=0.95f, .timestamp_ms=1000},
+    {.person_present=true, .phone_detected=true, .phone_near_hand=true,
+     .head_pitch=-20.0f, .hand_motion_score=0.7f, .confidence=0.85f,
+     .timestamp_ms=6000},
+    {.person_present=false, .confidence=0.90f, .timestamp_ms=11000},
+    {.person_present=true, .head_pitch=48.0f, .hand_motion_score=0.05f,
+     .confidence=0.78f, .timestamp_ms=16000},
+    {.person_present=true, .head_pitch=-3.0f, .hand_motion_score=0.1f,
+     .confidence=0.96f, .timestamp_ms=21000},
 };
 #define MOCK_OBS_COUNT (sizeof(g_mock_obs_sequence) / sizeof(g_mock_obs_sequence[0]))
 
@@ -113,6 +117,7 @@ int mock_mimo_get_advice(const session_stats_t *stats,
                          char *advice_out, size_t max_len)
 {
     if (!advice_out || max_len == 0) return FOCUS_ERR_PARAM;
+    (void)distraction_by_type;
 
     if (stats->current_mode == MODE_GENTLE)
     {

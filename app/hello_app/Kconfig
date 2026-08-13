@@ -9,3 +9,17 @@ config LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
 	---help---
 		Enable the contest 2026 team 087 hello app demo.
 		当前为设备硬件验证测试程序 (LCD/LED/按键/摄像头/加速度计/SD)。
+
+config CONTEST2026_087_LCD_STUB
+	bool "Use temporary LCD framebuffer backend"
+	default y
+	depends on LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
+	---help---
+		Enable the in-memory LCD backend until the ST7789V driver is linked.
+
+config CONTEST2026_087_WIFI_STUB
+	bool "Use temporary offline Wi-Fi backend"
+	default y
+	depends on LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
+	---help---
+		Keep MiMo in local fallback mode until the Wi-Fi module is linked.

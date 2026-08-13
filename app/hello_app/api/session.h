@@ -28,7 +28,7 @@ enum distraction_type {
 
 /* ---- session_report_t: 学习结束报告 ---- */
 
-typedef struct {
+typedef struct session_report_s {
     session_stats_t stats;                          /* 基础统计       */
     uint8_t  distraction_by_type[DIST_TYPE_COUNT];   /* 分心类型计数   */
     char     advice[512];                            /* MiMo 建议文本  */

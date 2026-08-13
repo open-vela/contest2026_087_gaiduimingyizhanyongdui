@@ -21,7 +21,7 @@ extern "C" {
 
 /* ---- 学习状态枚举 ---- */
 
-typedef enum {
+typedef enum status_e {
     FOCUSED,          /* 专注学习               */
     GLANCING_PHONE,   /* 短暂看手机 (不提醒)     */
     PLAYING_PHONE,    /* 玩手机 (提醒)           */
@@ -31,7 +31,7 @@ typedef enum {
 
 /* ---- 行动类型 ---- */
 
-typedef enum {
+typedef enum action_e {
     NONE,             /* 不需要行动              */
     REMIND,           /* 触发提醒 (严格:警告 / 鼓励:关怀) */
     ENCOURAGE         /* 触发鼓励 (仅鼓励模式, 专注里程碑) */
@@ -39,7 +39,7 @@ typedef enum {
 
 /* ---- study_state_t: 行为分析输出 ---- */
 
-typedef struct {
+typedef struct study_state_s {
     status_t  status;              /* 当前学习状态            */
     action_t  action;              /* 应采取的行动            */
     char      message[128];        /* 提醒/鼓励文字

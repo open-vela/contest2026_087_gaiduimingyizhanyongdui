@@ -4,3 +4,9 @@ app/hello_app/Make.dep
 app/hello_app/*.o
 *.o
 *.bin
+build*/
+out/
+*.a
+*.elf
+*.hex
+*.map
