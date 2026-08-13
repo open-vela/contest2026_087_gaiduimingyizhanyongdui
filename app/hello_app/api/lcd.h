@@ -47,7 +47,7 @@ uint16_t *lcd_get_framebuffer(void);
  * ss: 赵思涵输出的 study_state (取最新一条)
  * 50ms 内必须返回。 */
 int  lcd_show_status(device_status_t st, session_stats_t *s,
-                     void *study_state);
+                     study_state_t *ss);
 
 /* 显示学习报告 (学习结束调用一次)。
  * r:      报告数据

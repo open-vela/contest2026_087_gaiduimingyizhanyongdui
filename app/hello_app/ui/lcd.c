@@ -190,6 +190,13 @@ static void render_monitoring(ui_surface_t *surface,
   unsigned int milestone_progress = milestone % 30U;
   unsigned int next_milestone = milestone + (30U - milestone_progress);
 
+  /* 里程碑刚达成时 (milestone 为 30 的整数倍), 进度条显示满格庆祝,
+   * 避免出现"已专注 30 分钟"但进度条停在 0 的视觉矛盾。 */
+  if (study->milestone_reached)
+    {
+      milestone_progress = 30U;
+    }
+
   format_duration(total, sizeof(total), stats->total_duration_sec);
   format_duration(effective, sizeof(effective), stats->effective_duration_sec);
   ui_clear(surface, COLOR_BACKGROUND);
@@ -428,9 +435,8 @@ static int ui_initialize(void)
 }
 
 int lcd_show_status(device_status_t status, session_stats_t *stats,
-                    void *study_state)
+                    study_state_t *study)
 {
-  study_state_t *study = (study_state_t *)study_state;
   int ret = ui_initialize();
   if (ret < 0) return ret;
   if (stats == NULL || study == NULL) return FOCUS_ERR_PARAM;
