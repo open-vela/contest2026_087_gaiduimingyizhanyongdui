@@ -1,4 +1,4 @@
-﻿# FOCUS AIoT 学习状态监测终端
+# FOCUS AIoT 学习状态监测终端
 
 ## 作品简介
 
@@ -79,14 +79,14 @@ bash contest2026_087_gaiduimingyizhanyongdui/scripts/build_hwtest.sh
 
 产物是 `nuttx/nuttx.bin`，烧录地址为 `0x0`。烧录与硬件测试方法见 `board/contest_board/configs/hwtest/README.md`。
 
-当前 Kconfig 默认启用模拟后端：
+当前 Kconfig 默认状态：
 
 ```text
-CONFIG_CONTEST2026_087_LCD_STUB=y
-CONFIG_CONTEST2026_087_WIFI_STUB=y
+CONFIG_CONTEST2026_087_LCD_STUB=n    # 真实 LCD 驱动 (hardware/lcd_st7789.c, /dev/fb0 + mmap)
+CONFIG_CONTEST2026_087_WIFI_STUB=y   # Wi-Fi 仍为离线模拟后端
 ```
 
-接入真实 LCD 或 Wi-Fi 实现时关闭对应选项。
+接入真实 Wi-Fi 实现时关闭 `CONFIG_CONTEST2026_087_WIFI_STUB`；如需回到内存 LCD 后端（离线验证 UI）可临时打开 `CONFIG_CONTEST2026_087_LCD_STUB`。
 
 ## 主机测试
 
@@ -114,6 +114,6 @@ AI 用于核对团队接口、迁移已有 UI、检查线程和内存设计、�
 
 ## 仍需联调的内容
 
-- 张沐泽提供 ST7789V 实现后，关闭 `CONFIG_CONTEST2026_087_LCD_STUB`，验证 `lcd_flush()` 的 DMA 生命周期。
+- ~~张沐泽提供 ST7789V 实现后，关闭 `CONFIG_CONTEST2026_087_LCD_STUB`~~ 已接入真实 LCD 驱动 (`hardware/lcd_st7789.c`)，待上板验证 `lcd_flush()` 实际刷新效果与 ≤50ms 时延。
 - 网络模块提供真实 MiMo 地址和鉴权配置后，关闭 `CONFIG_CONTEST2026_087_WIFI_STUB`。
 - 状态机完成会话统计后，用真实 `session_stats_t` 和 `session_report_t` 替换主循环中的演示数据。
