@@ -15,6 +15,8 @@ CSRCS   = core/mock.c core/state_machine.c \
 
 ifeq ($(CONFIG_CONTEST2026_087_LCD_STUB),y)
 CSRCS  += hardware/lcd_stub.c
+else
+CSRCS  += hardware/lcd_st7789.c
 endif
 
 ifeq ($(CONFIG_CONTEST2026_087_WIFI_STUB),y)
