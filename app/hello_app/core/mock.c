@@ -9,6 +9,7 @@
 
 #include "mock.h"
 #include "../api/error.h"
+#include "../api/behavior.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -42,55 +43,22 @@ int mock_perception_process(observation_t *out)
     return FOCUS_OK;
 }
 
-/* ---- Mock 行为 ---- */
-
-void mock_behavior_init(void)
+/*
+ * 临时历史提供器：真实 perception.c 接入后由强符号覆盖。
+ * 这样当前 mock 基线可以直接链接行为引擎，行为单测仍可提供自己的
+ * perception_get_history() 实现。
+ */
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+int perception_get_history(observation_t *buf, int n)
 {
-    /* no-op */
-}
+    int count;
 
-/* 简单直接映射 (不做真实时序分析，仅验证链路) */
-study_state_t mock_behavior_analyze(const observation_t *obs)
-{
-    study_state_t ss;
-    memset(&ss, 0, sizeof(ss));
-
-    if (obs == NULL)
-    {
-        ss.status  = FOCUSED;
-        ss.action  = NONE;
-        return ss;
-    }
-
-    if (!obs->person_present)
-    {
-        ss.status  = AWAY;
-        ss.action  = REMIND;
-        snprintf(ss.message, sizeof(ss.message), "%s", "请回到座位!");
-        ss.focus_score_delta = -10;
-    }
-    else if (obs->phone_detected && obs->phone_near_hand
-             && obs->hand_motion_score > 0.3)
-    {
-        ss.status  = PLAYING_PHONE;
-        ss.action  = REMIND;
-        snprintf(ss.message, sizeof(ss.message), "%s", "请放下手机!");
-        ss.focus_score_delta = -15;
-    }
-    else if (obs->head_pitch > 40.0f)
-    {
-        ss.status  = DROWSY;
-        ss.action  = REMIND;
-        snprintf(ss.message, sizeof(ss.message), "%s", "请注意坐姿!");
-        ss.focus_score_delta = -20;
-    }
-    else
-    {
-        ss.status  = FOCUSED;
-        ss.action  = NONE;
-    }
-
-    return ss;
+    if (buf == NULL || n <= 0) return 0;
+    count = n < (int)MOCK_OBS_COUNT ? n : (int)MOCK_OBS_COUNT;
+    memcpy(buf, g_mock_obs_sequence, (size_t)count * sizeof(*buf));
+    return count;
 }
 
 /* ---- Mock UI ---- */
@@ -160,62 +128,6 @@ button_event_t button_get_event(void)
       }
 
     return ev;
-}
-
-/* ---- Mock 行为分析 (赵思涵接口的占位实现) ---- */
-
-void behavior_set_mode(int mode)
-{
-    (void)mode;
-    printf("[behavior/mock] set_mode -> %s\n",
-           mode == MODE_GENTLE ? "GENTLE" : "STRICT");
-}
-
-/* behavior_analyze(): 每 tick 调用一次, 轮转输出 study_state。
- * 真实实现由赵思涵提供 (消费 perception_get_history 做时序分析)。
- *
- * mock 模拟真实行为的冷却逻辑: 每个状态持续 ~1 秒 (10 tick),
- * 但 REMIND 只在进入该状态的第一 tick 触发, 后续 tick 返回 FOCUSED,
- * 避免同一分心被重复计数。真实冷却由赵思涵的 remind_cooldown_sec 保证。 */
-study_state_t behavior_analyze(void)
-{
-    static int call         = 0;
-    static int idx          = 0;
-    static int tick_in_state = 0;
-    static const study_state_t seq[] = {
-        {FOCUSED,       NONE,     "",                false, 0, 0},
-        {PLAYING_PHONE, REMIND,   "请放下手机!",     false, 0, -15},
-        {FOCUSED,       NONE,     "",                false, 0, 0},
-        {AWAY,          REMIND,   "请回到座位!",     false, 0, -10},
-        {FOCUSED,       NONE,     "",                false, 0, 0},
-        {DROWSY,        REMIND,   "请注意坐姿!",     false, 0, -20},
-        {FOCUSED,       NONE,     "",                false, 0, 0},
-    };
-    const int SEQ_N = (int)(sizeof(seq) / sizeof(seq[0]));
-    study_state_t s;
-
-    call++;
-    tick_in_state++;
-
-    /* 每 10 tick (约 1 秒) 轮转到下一个状态 */
-    if ((call % 10) == 0)
-      {
-        idx = (idx + 1) % SEQ_N;
-        tick_in_state = 0;
-      }
-
-    s = seq[idx];
-
-    /* 冷却模拟: REMIND 只在进入状态的第一 tick 返回, 其余返回 FOCUSED */
-    if (s.action == REMIND && tick_in_state > 0)
-      {
-        s.status           = FOCUSED;
-        s.action           = NONE;
-        s.message[0]       = '\0';
-        s.focus_score_delta = 0;
-      }
-
-    return s;
 }
 
 /* ---- Mock 音频 (张沐泽接口的占位实现) ---- */

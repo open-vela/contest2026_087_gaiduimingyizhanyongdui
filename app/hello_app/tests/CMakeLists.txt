@@ -19,3 +19,15 @@ if(NOT WIN32)
 endif()
 enable_testing()
 add_test(NAME focus_aiot_tests COMMAND focus_aiot_tests)
+
+add_executable(focus_aiot_behavior_tests
+  test_behavior.c
+  ../behavior/behavior.c
+  ../behavior/behavior_config.c)
+target_include_directories(focus_aiot_behavior_tests PRIVATE
+  ../api ../config)
+if(NOT WIN32)
+  target_compile_options(focus_aiot_behavior_tests PRIVATE
+    -Wall -Wextra -Werror)
+endif()
+add_test(NAME focus_aiot_behavior_tests COMMAND focus_aiot_behavior_tests)

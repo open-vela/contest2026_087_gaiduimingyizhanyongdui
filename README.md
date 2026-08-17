@@ -23,8 +23,9 @@ app/hello_app/
 ├─ api/                  # 团队冻结的跨模块接口
 ├─ config/               # 严格和鼓励模式配置
 ├─ core/                 # mock 主链路和状态机预留实现
+├─ behavior/             # 赵思涵负责的时序行为分析与双模式策略
 ├─ hardware/             # 可关闭的 LCD、Wi-Fi 模拟后端
-├─ tests/                # UI 主机单元测试
+├─ tests/                # UI 与行为模块主机单元测试
 └─ ui/
    ├─ lcd.c              # 页面渲染和异步消息线程
    ├─ lcd_icons.c        # 双模式状态图标
@@ -96,6 +97,23 @@ cmake --build build/focus-aiot-tests
 ctest --test-dir build/focus-aiot-tests --output-on-failure
 ```
 
+行为模块也可以脱离硬件单独测试：
+
+```bash
+cc -std=c99 -Wall -Wextra -Werror \
+  -Iapp/hello_app/api -Iapp/hello_app/config \
+  app/hello_app/tests/test_behavior.c \
+  app/hello_app/behavior/behavior.c \
+  app/hello_app/behavior/behavior_config.c \
+  -o build/focus_aiot_behavior_tests
+build/focus_aiot_behavior_tests
+```
+
+行为引擎只消费 `perception_get_history()` 提供的 Observation 历史，负责
+持续时间判定、严格/鼓励阈值、提醒冷却、累计提醒次数和专注里程碑去重。
+当前完整应用仍保留 mock 感知历史；真实 `perception.c` 接入后会覆盖该 mock
+历史提供器。
+
 测试覆盖公共头文件兼容、严格和鼓励两套主题、三秒消息恢复、报告页面、中文绘制和 MiMo 本地降级。开发提交使用 GCC C99 的 `-Wall -Wextra -Werror` 检查 UI 和完整应用。
 
 ## 中文字库更新
@@ -116,4 +134,5 @@ AI 用于核对团队接口、迁移已有 UI、检查线程和内存设计、�
 
 - ~~张沐泽提供 ST7789V 实现后，关闭 `CONFIG_CONTEST2026_087_LCD_STUB`~~ 已接入真实 LCD 驱动 (`hardware/lcd_st7789.c`)，待上板验证 `lcd_flush()` 实际刷新效果与 ≤50ms 时延。
 - 网络模块提供真实 MiMo 地址和鉴权配置后，关闭 `CONFIG_CONTEST2026_087_WIFI_STUB`。
+- 周礼航接入真实 `perception_get_history()` 后，使用真实 Observation 历史联调行为引擎。
 - 状态机完成会话统计后，用真实 `session_stats_t` 和 `session_report_t` 替换主循环中的演示数据。
