@@ -14,7 +14,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "../api/perception.h"
-#include "../api/behavior.h"
 #include "../api/session.h"
 
 #ifdef __cplusplus
@@ -33,14 +32,6 @@ void mock_perception_init(void);
 
 /* 输出一个假 observation_t (轮流: FOCUSED/PLAYING_PHONE/AWAY/DROWSY) */
 int  mock_perception_process(observation_t *out);
-
-/* ==================== Mock 行为 ==================== */
-
-/* 初始化 mock 行为分析 */
-void mock_behavior_init(void);
-
-/* 基于 observation 产生 study_state (直接映射，不做真实时序) */
-study_state_t mock_behavior_analyze(const observation_t *obs);
 
 /* ==================== Mock UI ==================== */
 
