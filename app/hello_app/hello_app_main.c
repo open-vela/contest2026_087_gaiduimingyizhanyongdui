@@ -23,6 +23,8 @@
 #include <unistd.h>
 
 #include "api/error.h"
+#include "api/audio.h"
+#include "api/button.h"
 #include "api/lcd.h"
 #include "api/perception.h"
 #include "api/behavior.h"
@@ -45,6 +47,10 @@ static void init_modules(void)
 
     printf("[behavior]  init mode=STRICT\n");
     behavior_init(MODE_STRICT);
+
+    /* 张沐泽硬件驱动初始化 (stub 模式为 no-op, 真实模式配置 GPIO/I2S) */
+    button_init();
+    audio_init();
 
     if (lcd_init() == FOCUS_OK)
     {

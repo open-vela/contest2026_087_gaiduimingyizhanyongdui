@@ -12,9 +12,21 @@
 #  define FOCUS_WEAK
 #endif
 
+FOCUS_WEAK int wifi_connect(const char *ssid, const char *password)
+{
+  (void)ssid;
+  (void)password;
+  return FOCUS_ERR_NET_DISCONN;
+}
+
 FOCUS_WEAK bool wifi_is_connected(void)
 {
   return false;
+}
+
+FOCUS_WEAK int wifi_get_rssi(void)
+{
+  return 0;
 }
 
 FOCUS_WEAK int wifi_http_post(const char *url, const char *body,

@@ -103,55 +103,6 @@ int mock_mimo_get_advice(const session_stats_t *stats,
     return FOCUS_OK;
 }
 
-/* ---- Mock 按键 (张沐泽接口的占位实现) ---- */
-
-#include "../api/button.h"
-
-static int g_mock_btn_tick = 0;
-
-button_event_t button_get_event(void)
-{
-    /* 模拟按键序列: 让 FSM 走完一次完整学习流程。
-     * 真实实现由张沐泽提供 (GPIO 中断 + 长短按判定)。 */
-    button_event_t ev = BTN_NONE;
-    g_mock_btn_tick++;
-
-    switch (g_mock_btn_tick)
-      {
-        case 5:   ev = BTN_START_LONGPRESS;  break;  /* 进入模式选择 */
-        case 10:  ev = BTN_START_SHORT;      break;  /* 确认，开始学习 */
-        case 50:  ev = BTN_PAUSE_SHORT;      break;  /* 暂停 */
-        case 60:  ev = BTN_PAUSE_SHORT;      break;  /* 恢复 */
-        case 100: ev = BTN_PAUSE_LONGPRESS;  break;  /* 停止 → 报告 */
-        case 110: ev = BTN_START_SHORT;      break;  /* 返回 IDLE */
-        default:  ev = BTN_NONE;             break;
-      }
-
-    return ev;
-}
-
-/* ---- Mock 音频 (张沐泽接口的占位实现) ---- */
-
-#include "../api/audio.h"
-
-int audio_play_tts(const char *text)
-{
-    printf("[audio/mock/TTS] %s\n", text ? text : "");
-    return FOCUS_OK;
-}
-
-void audio_play_buzzer(int pattern)
-{
-    printf("[audio/mock/buzzer] pattern=%d\n", pattern);
-}
-
-int audio_play_pcm(const uint8_t *data, size_t len)
-{
-    (void)data;
-    (void)len;
-    return FOCUS_OK;
-}
-
 /* ---- Mock 摄像头 ---- */
 
 void mock_camera_tick(void)

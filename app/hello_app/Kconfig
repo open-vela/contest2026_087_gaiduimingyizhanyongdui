@@ -24,3 +24,27 @@ config CONTEST2026_087_WIFI_STUB
 	depends on LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
 	---help---
 		Keep MiMo in local fallback mode until the Wi-Fi module is linked.
+
+config CONTEST2026_087_BUTTON_STUB
+	bool "Use mock button backend"
+	default y
+	depends on LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
+	---help---
+		Enable the mock button sequence instead of the real GPIO button
+		driver (hardware/buttons.c).
+
+config CONTEST2026_087_CAMERA_STUB
+	bool "Use mock camera backend"
+	default y
+	depends on LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
+	---help---
+		Enable the mock camera backend instead of the real OV2640 driver
+		(hardware/camera_ov2640.c).
+
+config CONTEST2026_087_AUDIO_STUB
+	bool "Use mock audio backend"
+	default y
+	depends on LVX_USE_DEMO_CONTEST2026_087_HELLO_APP
+	---help---
+		Enable the mock audio backend instead of the real I2S/buzzer
+		driver (hardware/audio_i2s.c).
