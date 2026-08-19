@@ -16,6 +16,7 @@
 
 #include <nuttx/config.h>
 
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -23,6 +24,7 @@
 #include <netdb.h>
 #include <nuttx/net/ioctl.h>
 #include <nuttx/wireless/wireless.h>
+#include <wireless/wapi.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -42,6 +44,8 @@
 int wifi_connect(const char *ssid, const char *password)
 {
   struct iwreq iwr;
+  struct iw_encode_ext *ext;
+  char ext_buf[sizeof(struct iw_encode_ext) + 64];
   int sock;
 
   if (ssid == NULL || password == NULL)
@@ -60,31 +64,32 @@ int wifi_connect(const char *ssid, const char *password)
       return FOCUS_ERR_NET_DISCONN;
     }
 
+  /* 1. 先设密码: 驱动 esp_wifi_sta_password 从 u.encoding.pointer
+   *    读 struct iw_encode_ext (key/key_len/alg)。 */
+  ext = (struct iw_encode_ext *)ext_buf;
+  memset(ext, 0, sizeof(*ext));
+  ext->alg     = IW_ENCODE_ALG_CCMP;
+  ext->key_len = (uint16_t)strlen(password);
+  memcpy(ext->key, password, ext->key_len);
+
   memset(&iwr, 0, sizeof(iwr));
-  strncpy(iwr.ifr_name, WIFI_IFNAME, IFNAMSIZ);
-
-  /* 设置 SSID */
-  iwr.u.essid.flags = 1;               /* active */
-  iwr.u.essid.length = strlen(ssid);
-  iwr.u.essid.pointer = (FAR void *)ssid;
-  if (ioctl(sock, SIOCSIWESSID, (unsigned long)&iwr) < 0)
-    {
-      close(sock);
-      return FOCUS_ERR_NET_DISCONN;
-    }
-
-  /* 设置 WPA2 密码 (key) */
-  iwr.u.essid.flags = IW_ENCODE_DISABLED;
-  iwr.u.essid.length = strlen(password);
-  iwr.u.essid.pointer = (FAR void *)password;
+  strlcpy(iwr.ifr_name, WIFI_IFNAME, IFNAMSIZ);
+  iwr.u.encoding.pointer = ext;
+  iwr.u.encoding.length  = (uint16_t)(sizeof(*ext) + ext->key_len);
   if (ioctl(sock, SIOCSIWENCODEEXT, (unsigned long)&iwr) < 0)
     {
       close(sock);
       return FOCUS_ERR_NET_DISCONN;
     }
 
-  /* 提交连接 */
-  if (ioctl(sock, SIOCSIWCOMMIT, (unsigned long)&iwr) < 0)
+  /* 2. 再设 SSID: IW_ESSID_ON 触发驱动 ops->connect()。
+   *    顺序必须密码在前 (SSID 时即连接)。 */
+  memset(&iwr, 0, sizeof(iwr));
+  strlcpy(iwr.ifr_name, WIFI_IFNAME, IFNAMSIZ);
+  iwr.u.essid.flags   = IW_ESSID_ON;
+  iwr.u.essid.length  = (uint16_t)strlen(ssid);
+  iwr.u.essid.pointer = (FAR char *)ssid;
+  if (ioctl(sock, SIOCSIWESSID, (unsigned long)&iwr) < 0)
     {
       close(sock);
       return FOCUS_ERR_NET_DISCONN;

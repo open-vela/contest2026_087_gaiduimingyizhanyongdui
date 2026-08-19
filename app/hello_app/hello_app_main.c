@@ -79,6 +79,7 @@ static void init_modules(void)
 #include "api/camera.h"
 #include "api/wifi.h"
 #include "api/audio.h"
+#include <netutils/netlib.h>
 
 /* `hello_app hwbutton`: 真实按键事件测试 (10s) */
 static int hw_test_button(void)
@@ -175,16 +176,24 @@ static int hw_test_wifi(int argc, char *argv[])
     char resp[1024];
     int ret;
 
-    if (argc < 3)
+    if (argc < 4)
     {
         printf("用法: hello_app hwwifi <ssid> <password>\n");
         return 1;
     }
 
     printf("===== 硬件验证: WiFi =====\n");
-    ret = wifi_connect(argv[1], argv[2]);
+    /* argv: [hello_app, hwwifi, ssid, password] → ssid=argv[2], pass=argv[3] */
+    ret = wifi_connect(argv[2], argv[3]);
     printf("  wifi_connect=%d connected=%d rssi=%d dBm\n",
            ret, wifi_is_connected(), wifi_get_rssi());
+
+    /* DHCP 获取 IP + DNS (netlib_obtain_ipv4addr, 阻塞至完成) */
+    printf("  获取 IP (DHCP)...\n");
+    {
+        int ipret = netlib_obtain_ipv4addr("wlan0");
+        printf("  DHCP ret=%d\n", ipret);
+    }
 
     ret = wifi_http_post("http://httpbin.org/post",
                          "{\"test\":1}", resp, sizeof(resp));
