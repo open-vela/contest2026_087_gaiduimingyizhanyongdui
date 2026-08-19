@@ -1,7 +1,7 @@
 # FOCUS AIoT - 成员任务安排
 
-> 更新: 2026-08-18 | 负责人: 万思源
-> 前提: 接口已冻结 (`api/*.h`), 状态机/LCD/UI/行为引擎已完成, mock 主链路跑通。
+> 更新: 2026-08-19 | 负责人: 万思源
+> 前提: 接口已冻结 (`api/*.h`), 状态机/LCD/UI/行为引擎/硬件全栈已完成。
 
 ## 当前完成状态
 
@@ -11,16 +11,17 @@
 | core/state_machine.c | 万思源 | ✅ 已合并 |
 | ui/ (LCD页面+MiMo+字体) | 郭黄亦昕 | ✅ 已合并 |
 | hardware/lcd_st7789.c | 张沐泽 | ✅ 已合并, 真机验证通过 |
-| behavior/ (时序引擎+配置表+单测) | 赵思涵 | ✅ 已合并, 单测 100% 通过, 固件验证通过 |
-| hardware/ 全栈 (按键/WiFi/摄像头/音频) | 张沐泽 | ✅ 已提交, 审查修复待合并, **待真机核验** |
+| behavior/ (时序引擎+配置表+单测) | 赵思涵 | ✅ 已合并, 单测 100% 通过 |
+| hardware/ 全栈 (按键/WiFi/摄像头/音频) | 张沐泽 | ✅ **真机核验 100% 通过** (PR #10) |
 
 **关键衔接**: `core/mock.c` 已提供 **weak `perception_get_history()`** 临时历史提供器,
 真实感知模块接入后由强符号自动覆盖 (和 LCD stub 相同的替换机制)。行为引擎当前直接
 消费 mock 历史即可运行, 无需等待真实感知。
 
-**硬件驱动状态**: 4 个真实驱动 (buttons/wifi_esp32/camera_ov2640/audio_i2s) 已提交,
-审查发现并修复: camera DQBUF 无超时、wifi RSSI 结构错误、button 内核 API 链接失败、
-arch 私有头 include。**编译通过, 但尚未真机核验** (默认 Kconfig 仍走 stub, 需手动关闭 STUB 开关再烧录验证)。
+**硬件驱动状态 (2026-08-19 真机核验完成)**:
+- LCD ✅ 上屏 / 按键 ✅ 长短按 / 音频 ✅ LED 降级 (板载无蜂鸣器)
+- 摄像头 ✅ RGB565 采帧 (驱动为单帧模式, 逐帧触发) / WiFi ✅ 连接+DHCP+HTTP POST
+- 真机核验修复: camera 格式/缓冲、wifi ioctl 流程、audio 降级等, 见 PR #10
 
 ---
 
@@ -164,12 +165,12 @@ arch 私有头 include。**编译通过, 但尚未真机核验** (默认 Kconfig
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 行为分析 | 配置表迁移 + 时序引擎 + 单测 | ✅ 赵思涵已完成 |
-| 硬件全栈 | 按键/WiFi/摄像头/音频驱动 + 审查修复 | ✅ 已提交 (待真机核验) |
-| 进行中 | 真机核验硬件驱动; 周礼航 perception 实现 | 进行中 |
+| 硬件全栈 | 按键/WiFi/摄像头/音频驱动 | ✅ 张沐泽真机核验 100% |
+| 进行中 | 周礼航 perception 实现 (最后一条线) | 进行中 |
 | 待 | 全链路联调 (真实 observation → behavior → state_machine → UI) | 待 |
 
 ## 当前焦点
 
-1. **真机核验 (张沐泽)**: 关闭 STUB 开关烧录, 验证按键/WiFi/摄像头/蜂鸣 (见下文真机验证指南)。
-2. **周礼航**: perception_process 实现, 替换 mock (先固定 observation, 再接云端), 提供强符号 `perception_get_history()` 接管历史。
-3. 全链路联调: 真实 observation → 行为引擎 (已就绪) → 状态机 → UI 上屏。
+1. **周礼航**: perception_process 实现, 替换 mock (先固定 observation, 再接云端), 提供强符号 `perception_get_history()` 接管历史。摄像头已就绪 (张沐泽, RGB565 逐帧采集)。
+2. 全链路联调: 真实 observation → 行为引擎 (已就绪) → 状态机 → UI 上屏。
+3. 硬件验证子命令: `hello_app hwbutton|hwaudio|hwcamera|hwwifi <ssid> <pass>` 保留供联调排查。
