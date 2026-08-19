@@ -25,6 +25,8 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -32,13 +34,20 @@
 #define CAMERA_WIDTH    320
 #define CAMERA_HEIGHT   240
 #define CAMERA_BUFCOUNT 2
+#define CAMERA_BUFSIZE  (CAMERA_WIDTH * CAMERA_HEIGHT * 2)  /* RGB565 全尺寸 */
 #define CAMERA_FRAME_TIMEOUT_MS 500   /* 单帧采集超时上限 */
+
+/* ⚠️ 真机核验 (2026-08-19): esp32s3_cam 驱动实际配置 QVGA RGB565
+ * (即使 S_FMT 请求 JPEG 也回显 JPEG 但传感器输出 RGB565)。
+ * 采集必须用 RGB565 + V4L2_BUF_MODE_RING (设备验证成功的模式)。
+ * JPEG 输出留给感知层用 STILL_CAPTURE/TAKEPICT 路径。 */
 
 /* 最近一帧 (camera_task 采集后更新, perception 读取) */
 uint8_t *camera_frame_buffer = NULL;
 size_t   camera_frame_size   = 0;
 
 static int g_camera_fd = -1;
+static uint8_t *g_cam_buf2 = NULL;  /* 第 2 个 RING 缓冲 (内部分配) */
 
 /****************************************************************************
  * Name: camera_init
@@ -54,27 +63,40 @@ int camera_init(void)
       return FOCUS_ERR_HW_NOTREADY;
     }
 
-  /* 设置 QVGA JPEG 输出 */
+  /* 设置 QVGA RGB565 输出 (匹配驱动实际, RING 模式可采帧) */
   memset(&fmt, 0, sizeof(fmt));
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   fmt.fmt.pix.width = CAMERA_WIDTH;
   fmt.fmt.pix.height = CAMERA_HEIGHT;
-  fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_JPEG;
+  fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
   fmt.fmt.pix.field = V4L2_FIELD_NONE;
   if (ioctl(g_camera_fd, VIDIOC_S_FMT, (unsigned long)&fmt) < 0)
     {
+      printf("[camera] S_FMT FAILED errno=%d\n", errno);
       close(g_camera_fd);
       g_camera_fd = -1;
       return FOCUS_ERR_HW_NOTREADY;
     }
 
-  /* 请求用户指针缓冲区 */
+  /* 请求用户指针缓冲区, RING 模式 (驱动循环填充, 设备验证成功) */
   memset(&req, 0, sizeof(req));
   req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req.memory = V4L2_MEMORY_USERPTR;
   req.count = CAMERA_BUFCOUNT;
+  req.mode  = V4L2_BUF_MODE_RING;
   if (ioctl(g_camera_fd, VIDIOC_REQBUFS, (unsigned long)&req) < 0)
     {
+      printf("[camera] REQBUFS FAILED errno=%d\n", errno);
+      close(g_camera_fd);
+      g_camera_fd = -1;
+      return FOCUS_ERR_HW_NOTREADY;
+    }
+
+  /* RING 模式需全部缓冲入队, 分配第 2 缓冲 */
+  g_cam_buf2 = malloc(CAMERA_BUFSIZE);
+  if (g_cam_buf2 == NULL)
+    {
+      printf("[camera] 第 2 缓冲分配失败\n");
       close(g_camera_fd);
       g_camera_fd = -1;
       return FOCUS_ERR_HW_NOTREADY;
@@ -100,17 +122,23 @@ int camera_capture_frame(uint8_t *buf, size_t *size)
       return FOCUS_ERR_HW_NOTREADY;
     }
 
-  /* 入队缓冲区 */
-  memset(&vbuf, 0, sizeof(vbuf));
-  vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  vbuf.memory = V4L2_MEMORY_USERPTR;
-  vbuf.index = 0;
-  vbuf.m.userptr = (unsigned long)buf;
-  vbuf.length = 50 * 1024;   /* QVGA JPEG 足够 */
-  if (ioctl(g_camera_fd, VIDIOC_QBUF, (unsigned long)&vbuf) < 0)
-    {
-      return FOCUS_ERR_IO;
-    }
+  /* 入队全部缓冲 (RING 模式需环完整, 否则 DQBUF 阻塞) */
+  {
+    int i;
+    for (i = 0; i < CAMERA_BUFCOUNT; i++)
+      {
+        memset(&vbuf, 0, sizeof(vbuf));
+        vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        vbuf.memory = V4L2_MEMORY_USERPTR;
+        vbuf.index = i;
+        vbuf.m.userptr = (unsigned long)((i == 0) ? buf : g_cam_buf2);
+        vbuf.length = CAMERA_BUFSIZE;
+        if (ioctl(g_camera_fd, VIDIOC_QBUF, (unsigned long)&vbuf) < 0)
+          {
+            return FOCUS_ERR_IO;
+          }
+      }
+  }
 
   /* 开启流 (若已开启会返回 EBUSY, 忽略) */
   ioctl(g_camera_fd, VIDIOC_STREAMON, (unsigned long)&type);
@@ -131,6 +159,7 @@ int camera_capture_frame(uint8_t *buf, size_t *size)
   vbuf.memory = V4L2_MEMORY_USERPTR;
   if (ioctl(g_camera_fd, VIDIOC_DQBUF, (unsigned long)&vbuf) < 0)
     {
+      printf("[camera] DQBUF FAILED errno=%d\n", errno);
       ioctl(g_camera_fd, VIDIOC_STREAMOFF, (unsigned long)&type);
       return FOCUS_ERR_TIMEOUT;
     }
@@ -154,6 +183,11 @@ void camera_deinit(void)
     {
       close(g_camera_fd);
       g_camera_fd = -1;
+    }
+  if (g_cam_buf2 != NULL)
+    {
+      free(g_cam_buf2);
+      g_cam_buf2 = NULL;
     }
   camera_frame_buffer = NULL;
   camera_frame_size   = 0;
