@@ -71,40 +71,91 @@
 
 ---
 
-## 二、周礼航 - 视觉感知 (`perception/`)
+## 二、周礼航 - 视觉感知 (`perception/`) ⭐ 当前焦点
 
 **任务**: 实现 `api/perception.h` 三个函数, 从图片输出 `observation_t`。
 
-### 阶段 1: 先 mock (不调云端)
+### 📁 要写的文件
 
-- **文件**: `perception/perception.c`
-- 输出固定 `observation_t` (轮流 FOCUSED/PLAYING_PHONE/AWAY/DROWSY)
-- **效果**: `perception_process()` 返回有效 observation。
-- 💡 **衔接提示**: 当前 `core/mock.c` 的 weak `perception_get_history()` 已被行为引擎消费,
-  你实现真实 `perception.c` 时提供强符号 `perception_get_history()` 即自动接管历史管理。
-  请同时保留 mock 路径 (Kconfig 开关或编译宏) 便于回退。
+```
+perception/perception.c          ← 主实现 (三函数)
+perception/perception.h          ← 内部声明 (可选)
+tests/test_perception.c          ← 独立测试 (可选, 参考 test_behavior.c 模式)
+```
 
-### 阶段 2: 接云端
+### 函数实现细化
 
-- base64(JPEG) → 构造 JSON → `wifi_http_post()` → 解析响应 → 3 帧去抖
-- **效果**: 真实图片 → 云端 → `observation_t`, 失败返回错误码不阻塞。
+**① `perception_init(api_url, api_key)`**
+- static 保存 url/key (如 g_api_url/g_api_key)
+- 清零历史缓冲 + 计数器
+- 返回 FOCUS_OK
 
-### 阶段 3: 历史管理
+**② `perception_process(jpeg, jpeg_len, out)`** — 核心
 
-- 环形缓冲区 `obs_history[60]`
-- `perception_get_history()` 按时间从旧到新返回, 供赵思涵时序分析。
+阶段 1 (mock, 先联调):
+- 不调云端, 用固定规则: 根据 jpeg_len 或预设序列轮流输出
+  FOCUSED/PLAYING_PHONE/AWAY/DROWSY 对应的 observation_t
+- 这样赵思涵/万思源能立刻联调
+
+阶段 2 (真实云端):
+```
+base64_encode(jpeg, jpeg_len, b64)     // 320x240 JPEG ≈ 30KB → b64 ≈ 40KB
+构造 JSON: {"image":"<b64>","width":320,"height":240}
+wifi_http_post(api_url, json, resp, 4096)   // 张沐泽的, ≤6s
+cJSON 解析 resp
+填充 observation_t
+```
+
+**③ `perception_get_history(buf, n)`**
+- 环形缓冲区 `obs_history[60]`, 每条约 40 字节 → 2.4KB
+- 从旧到新拷贝 (取最近的 n 条)
+- 返回实际条数
+
+### 云端 API 协议 (已冻结, 见规范)
+
+```
+POST /api/v1/detect
+Request:  {"image":"<base64>","width":320,"height":240}
+Response: {"code":0,"data":{
+            "person":{"detected":true,"bbox":[0.15,0.10,0.70,0.85]},
+            "phone":{"detected":true,"near_hand":true},
+            "head_pose":{"pitch":-25.3,"yaw":2.1},
+            "hand_motion_score":0.35,"confidence":0.92}}
+```
+
+### 去抖 (阶段 2)
+
+3 帧滑动窗口:
+- bool 字段 (person/phone/near_hand): 多数投票
+- float 字段 (pitch/yaw): 中位数
+- hand_motion: 取最大值 (宁可多报)
+- confidence: 取均值
+
+### 时间戳
+
+- 用 `clock_gettime(CLOCK_MONOTONIC)` (参考 `core/state_machine.c` 的 monotonic_ms)
+- 每帧写入 `out->timestamp_ms`
 
 ### 关键约束
 
 - 摄像头是**单帧模式**: 用 `V4L2_BUF_TYPE_STILL_CAPTURE` + `VIDIOC_TAKEPICT_START` 逐帧触发。
-- HTTP 超时 ≤6s, JSON 缺字段不崩。
+  张沐泽已提供 `camera_capture_frame()` (RGB565), 如需要 JPEG 请按规范走 STILL_CAPTURE。
+- HTTP 超时 ≤6s, JSON 缺字段不崩 (cJSON 判空)。
 - **不区分严格/鼓励模式** (那是赵思涵的事)。
+- 失败返回: `FOCUS_ERR_PERCEP_TIMEOUT(-30)` / `FOCUS_ERR_PERCEP_JSON(-31)` / `FOCUS_ERR_PERCEP_NODATA(-32)`
+
+### 编译接入
+
+- `Makefile`/`CMakeLists.txt` 的 `CSRCS` 加 `perception/perception.c`
+- mock 路径保留: 用 `#ifdef PERCEPTION_MOCK` 或 Kconfig 开关, 默认 mock 可回退
+- ⚠️ 提供强符号 `perception_get_history()` 即自动覆盖 `core/mock.c` 的 weak 桩
 
 ### 验收
 
-- `perception_process()` 返回有效 observation (mock 和真实双路径)。
-- `perception_get_history()` 返回历史 observation。
-- 云端 API 失败时返回错误码, 不阻塞超过 6s。
+- `perception_process()` 返回有效 observation (mock + 真实双路径)。
+- `perception_get_history()` 返回历史, 时间戳递增。
+- 云端失败返回错误码, 不阻塞 >6s。
+- 真机: `hello_app` 主循环 behavior 消费真实 history 而非 mock。
 
 ---
 
