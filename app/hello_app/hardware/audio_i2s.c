@@ -16,43 +16,46 @@
 #include "../api/error.h"
 
 #include <nuttx/config.h>
-#include <nuttx/arch.h>
+#include <nuttx/leds/userled.h>
 
-#include <esp32s3_gpio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* TODO(上板核验): 按原理图确认蜂鸣器/扬声器 PWM 引脚, 默认占位 GPIO46 */
-#ifndef AUDIO_BUZZER_GPIO
-#  define AUDIO_BUZZER_GPIO 46
-#endif
+/*
+ * ⚠️ 2026-08-19 真机核验结论: ESP32-S3-EYE 板载无蜂鸣器/扬声器
+ * (board.h 无相关引脚, I2S0 仅 RX 麦克风)。原 GPIO46 蜂鸣假设无效。
+ * 音频输出统一降级为板载 Power LED 闪烁 (/dev/userleds, 已验证可用),
+ * 作为提醒的视觉反馈。如需真实声音, 可外接蜂鸣器到任意 GPIO 并
+ * 在 buzzer 分支改为 GPIO 翻转 (见下方 AUDIO_BUZZER_GPIO 占位)。
+ */
 
-static void buzzer_beep(unsigned int freq_hz, unsigned int duration_ms)
+static int g_led_fd = -1;
+
+/* 闪烁 n 次: on_ms 亮 / off_ms 灭 */
+static void led_blink(unsigned int times, unsigned int on_ms, unsigned int off_ms)
 {
-  unsigned int half_period_ms;
-  unsigned int elapsed;
-  unsigned int toggle;
+  unsigned int i;
 
-  if (freq_hz == 0)
+  for (i = 0; i < times; i++)
     {
-      return;
-    }
+      if (g_led_fd >= 0)
+        {
+          ioctl(g_led_fd, ULEDIOC_SETALL, (unsigned long)1);  /* 亮 */
+        }
+      usleep(on_ms * 1000);
 
-  half_period_ms = 1000U / freq_hz / 2U;
-  if (half_period_ms == 0)
-    {
-      half_period_ms = 1;
+      if (g_led_fd >= 0)
+        {
+          ioctl(g_led_fd, ULEDIOC_SETALL, (unsigned long)0);  /* 灭 */
+        }
+      usleep(off_ms * 1000);
     }
-
-  for (elapsed = 0, toggle = 0; elapsed < duration_ms; elapsed += half_period_ms)
-    {
-      esp32s3_gpiowrite(AUDIO_BUZZER_GPIO, toggle & 1);
-      toggle++;
-      up_mdelay(half_period_ms);
-    }
-
-  esp32s3_gpiowrite(AUDIO_BUZZER_GPIO, 0);
 }
 
 /****************************************************************************
@@ -60,9 +63,16 @@ static void buzzer_beep(unsigned int freq_hz, unsigned int duration_ms)
  ****************************************************************************/
 void audio_init(void)
 {
-  /* 蜂鸣器 GPIO 输出低电平 */
-  esp32s3_configgpio(AUDIO_BUZZER_GPIO, OUTPUT_FUNCTION_1);
-  esp32s3_gpiowrite(AUDIO_BUZZER_GPIO, 0);
+  /* 打开板载 LED, 用作提醒视觉反馈 */
+  g_led_fd = open("/dev/userleds", O_WRONLY);
+  if (g_led_fd < 0)
+    {
+      g_led_fd = -1;
+    }
+  else
+    {
+      ioctl(g_led_fd, ULEDIOC_SETALL, (unsigned long)0);
+    }
 }
 
 /****************************************************************************
@@ -98,16 +108,13 @@ void audio_play_buzzer(int pattern)
 {
   if (pattern == AUDIO_BUZZER_ENCOURAGE)
     {
-      buzzer_beep(2500, 500);   /* 一声较长柔和音 */
+      /* 鼓励: 一次较长闪烁 */
+      led_blink(1, 500, 200);
     }
   else
     {
-      /* 三声短促警告音 */
-      buzzer_beep(3000, 150);
-      up_mdelay(100);
-      buzzer_beep(3000, 150);
-      up_mdelay(100);
-      buzzer_beep(3000, 150);
+      /* 警告: 三次短促闪烁 */
+      led_blink(3, 150, 100);
     }
 }
 
