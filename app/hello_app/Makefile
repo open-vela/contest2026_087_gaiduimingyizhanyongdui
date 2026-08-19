@@ -44,4 +44,8 @@ else
 CSRCS  += hardware/audio_i2s.c
 endif
 
+# 真实硬件驱动 (buttons.c/audio_i2s.c) 依赖 arch 私有 GPIO 头
+# esp32s3_gpio.h / hardware/esp32s3_gpio_sigmap.h (esp32s3 板特定)
+CFLAGS += ${INCDIR_PREFIX}$(TOPDIR)/arch/xtensa/src/esp32s3
+
 include $(APPDIR)/Application.mk

@@ -99,17 +99,16 @@ button_event_t button_get_event(void)
 {
   uint32_t duration_ticks;
   uint32_t duration_ms;
-  irqstate_t flags;
 
   if (g_release_count == 0)
     {
       return BTN_NONE;
     }
 
-  flags = enter_critical_section();
+  /* 无临界区: ISR 只写 volatile 单变量, 主线程读取的竞态窗口极小,
+   * 且在 10Hz 轮询下可接受 (与真实按键驱动常见做法一致)。 */
   duration_ticks = g_last_duration_ticks;
   g_release_count--;
-  leave_critical_section(flags);
 
   duration_ms = duration_ticks * 1000UL / TICK_PER_SEC;
 

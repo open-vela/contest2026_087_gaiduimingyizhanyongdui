@@ -19,6 +19,7 @@
 #include <nuttx/config.h>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/videoio.h>
 
@@ -31,6 +32,7 @@
 #define CAMERA_WIDTH    320
 #define CAMERA_HEIGHT   240
 #define CAMERA_BUFCOUNT 2
+#define CAMERA_FRAME_TIMEOUT_MS 500   /* 单帧采集超时上限 */
 
 /* 最近一帧 (camera_task 采集后更新, perception 读取) */
 uint8_t *camera_frame_buffer = NULL;
@@ -89,7 +91,9 @@ int camera_init(void)
 int camera_capture_frame(uint8_t *buf, size_t *size)
 {
   struct v4l2_buffer vbuf;
+  struct pollfd pfd;
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  int pr;
 
   if (g_camera_fd < 0 || buf == NULL || size == NULL)
     {
@@ -111,14 +115,28 @@ int camera_capture_frame(uint8_t *buf, size_t *size)
   /* 开启流 (若已开启会返回 EBUSY, 忽略) */
   ioctl(g_camera_fd, VIDIOC_STREAMON, (unsigned long)&type);
 
-  /* 等待一帧 */
+  /* poll 等待帧可用, 防止驱动异常时 DQBUF 永久阻塞 */
+  pfd.fd = g_camera_fd;
+  pfd.events = POLLIN;
+  pr = poll(&pfd, 1, CAMERA_FRAME_TIMEOUT_MS);
+  if (pr <= 0)
+    {
+      ioctl(g_camera_fd, VIDIOC_STREAMOFF, (unsigned long)&type);
+      return FOCUS_ERR_TIMEOUT;
+    }
+
+  /* 取一帧 */
   memset(&vbuf, 0, sizeof(vbuf));
   vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   vbuf.memory = V4L2_MEMORY_USERPTR;
   if (ioctl(g_camera_fd, VIDIOC_DQBUF, (unsigned long)&vbuf) < 0)
     {
+      ioctl(g_camera_fd, VIDIOC_STREAMOFF, (unsigned long)&type);
       return FOCUS_ERR_TIMEOUT;
     }
+
+  /* 停流复位, 供下一次采集重新 STREAMON (驱动为单帧模式) */
+  ioctl(g_camera_fd, VIDIOC_STREAMOFF, (unsigned long)&type);
 
   *size = vbuf.bytesused;
   camera_frame_buffer = buf;
