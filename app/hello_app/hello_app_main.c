@@ -73,24 +73,148 @@ static void init_modules(void)
     }
 }
 
+/* ==================== 硬件真机验证子命令 ==================== */
+
+#include "api/button.h"
+#include "api/camera.h"
+#include "api/wifi.h"
+#include "api/audio.h"
+
+/* `hello_app hwbutton`: 真实按键事件测试 (10s) */
+static int hw_test_button(void)
+{
+    int i;
+    button_init();  /* 子命令不走 init_modules, 需自行初始化 */
+    printf("===== 硬件验证: 按键 (真实 GPIO) =====\n");
+    printf("请按 BOOT 键: 短按(<1s)/长按(1-3s)/超长按(>3s), 10 秒...\n");
+    for (i = 0; i < 100; i++)
+    {
+        button_event_t ev = button_get_event();
+        if (ev != BTN_NONE)
+        {
+            printf("  按键事件: %d (%s)\n", (int)ev,
+                   ev == BTN_START_SHORT ? "短按" :
+                   ev == BTN_START_LONGPRESS ? "长按" :
+                   ev == BTN_STOP ? "超长按" : "其他");
+        }
+        usleep(100 * 1000);
+    }
+    return 0;
+}
+
+/* `hello_app hwaudio`: 蜂鸣测试 (5 次) */
+static int hw_test_audio(void)
+{
+    int i;
+    audio_init();  /* 子命令不走 init_modules, 需自行初始化 */
+    printf("===== 硬件验证: 音频 (LED 闪烁降级) =====\n");
+    for (i = 0; i < 5; i++)
+    {
+        printf("  蜂鸣 %d/5...\n", i + 1);
+        audio_play_tts("测试蜂鸣");
+        usleep(500 * 1000);
+    }
+    return 0;
+}
+
+/* `hello_app hwcamera`: 摄像头采集 3 帧 */
+static int hw_test_camera(void)
+{
+    uint8_t *buf;
+    size_t size = 0;
+    int i;
+    int ret;
+
+    printf("===== 硬件验证: 摄像头 (OV2640) =====\n");
+    ret = camera_init();
+    if (ret != FOCUS_OK)
+    {
+        printf("  [FAIL] camera_init: %d\n", ret);
+        return 1;
+    }
+
+    buf = malloc(50 * 1024);
+    if (buf == NULL)
+    {
+        printf("  [FAIL] 内存不足\n");
+        camera_deinit();
+        return 1;
+    }
+
+    for (i = 0; i < 3; i++)
+    {
+        ret = camera_capture_frame(buf, &size);
+        if (ret == FOCUS_OK)
+        {
+            printf("  frame %d: %u bytes\n", i, (unsigned)size);
+        }
+        else
+        {
+            printf("  frame %d: FAILED (%d)\n", i, ret);
+        }
+        usleep(500 * 1000);
+    }
+
+    free(buf);
+    camera_deinit();
+    return 0;
+}
+
+/* `hello_app hwwifi <ssid> <password>`: WiFi 连接 + HTTP POST 测试 */
+static int hw_test_wifi(int argc, char *argv[])
+{
+    char resp[1024];
+    int ret;
+
+    if (argc < 3)
+    {
+        printf("用法: hello_app hwwifi <ssid> <password>\n");
+        return 1;
+    }
+
+    printf("===== 硬件验证: WiFi =====\n");
+    ret = wifi_connect(argv[1], argv[2]);
+    printf("  wifi_connect=%d connected=%d rssi=%d dBm\n",
+           ret, wifi_is_connected(), wifi_get_rssi());
+
+    ret = wifi_http_post("http://httpbin.org/post",
+                         "{\"test\":1}", resp, sizeof(resp));
+    printf("  HTTP POST=%d\n", ret);
+    if (ret == FOCUS_OK)
+    {
+        printf("  resp: %.200s\n", resp);
+    }
+
+    return ret == FOCUS_OK ? 0 : 1;
+}
+
 /* ==================== 主入口 ==================== */
 
 int main(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
+    if (argc > 1)
+    {
+        if (strcmp(argv[1], "hwbutton") == 0) return hw_test_button();
+        if (strcmp(argv[1], "hwaudio") == 0)  return hw_test_audio();
+        if (strcmp(argv[1], "hwcamera") == 0) return hw_test_camera();
+        if (strcmp(argv[1], "hwwifi") == 0)   return hw_test_wifi(argc, argv);
+        printf("未知命令: %s\n", argv[1]);
+        printf("用法: hello_app [hwbutton|hwaudio|hwcamera|hwwifi <ssid> <pass>]\n");
+        return 1;
+    }
+
     printf("\n");
     printf("==================================================\n");
-    printf("  FOCUS AIoT v0.2 (状态机 + 会话统计)\n");
+    printf("  FOCUS AIoT v0.3 (真实硬件驱动)\n");
     printf("  板卡: ESP32-S3-EYE / openvela\n");
-    printf("  负责人: 万思源 (state_machine)\n");
     printf("==================================================\n");
     printf("  模块状态:\n");
     printf("    state_machine  - 真实 FSM (core/state_machine.c)\n");
     printf("    ui             - 郭黄亦昕 (已集成)\n");
-    printf("    button/audio          - mock 占位 (待张沐泽)\n");
-    printf("    behavior              - 赵思涵时序引擎\n");
-    printf("    perception     - mock 占位 (待周礼航)\n");
+    printf("    behavior       - 赵思涵时序引擎\n");
+    printf("    button/audio/camera/wifi - 张沐泽真实驱动\n");
+    printf("    perception     - mock (待周礼航)\n");
+    printf("  子命令: hello_app hwbutton|hwaudio|hwcamera|hwwifi <ssid> <pass>\n");
     printf("==================================================\n\n");
 
     /* ---- 模块初始化 ---- */
@@ -98,8 +222,7 @@ int main(int argc, char *argv[])
     state_machine_init();
 
     printf("[core] 进入主循环 (state_machine_tick @ 10Hz)...\n");
-    printf("[core] mock 按键序列将自动驱动一次完整学习流程:\n");
-    printf("[core]   IDLE -> MODE_SELECT -> MONITORING(暂停/恢复) -> REPORT -> IDLE\n\n");
+    printf("[core] 真实按键驱动: 长按进模式选择, 短按开始, 超长按停止\n\n");
 
     /* ---- 主循环: state_machine_tick 驱动 ---- */
     for (;;)
