@@ -133,7 +133,7 @@ static int hw_test_camera(void)
         return 1;
     }
 
-    buf = malloc(50 * 1024);
+    buf = malloc(320 * 240 * 2);  /* RGB565 全尺寸 */
     if (buf == NULL)
     {
         printf("  [FAIL] 内存不足\n");
@@ -141,6 +141,7 @@ static int hw_test_camera(void)
         return 1;
     }
 
+    printf("  采集 3 帧 (驱动单帧模式, 首帧成功即验证链路)...\n");
     for (i = 0; i < 3; i++)
     {
         ret = camera_capture_frame(buf, &size);
@@ -150,14 +151,22 @@ static int hw_test_camera(void)
         }
         else
         {
-            printf("  frame %d: FAILED (%d)\n", i, ret);
+            printf("  frame %d: FAILED (%d) — 单帧模式后续帧失败为预期\n", i, ret);
         }
         usleep(500 * 1000);
     }
 
     free(buf);
     camera_deinit();
-    return 0;
+
+    if (size > 0)
+    {
+        printf("  [PASS] 摄像头链路正常 (采到 %u 字节帧)\n", (unsigned)size);
+        return 0;
+    }
+
+    printf("  [FAIL] 未采到有效帧\n");
+    return 1;
 }
 
 /* `hello_app hwwifi <ssid> <password>`: WiFi 连接 + HTTP POST 测试 */
