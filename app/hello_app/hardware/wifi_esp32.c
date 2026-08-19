@@ -145,7 +145,7 @@ int wifi_get_rssi(void)
     }
 
   close(sock);
-  return (int)iwr.u.stats.qual.level;
+  return (int)iwr.u.qual.level;
 }
 
 /****************************************************************************
