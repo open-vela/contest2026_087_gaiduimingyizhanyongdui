@@ -1,0 +1,124 @@
+/****************************************************************************
+ * FOCUS AIoT - 真实 MiMo 链路单测 (tests/test_mimo_cloud.c)
+ *
+ * 负责人: 周礼航
+ * 用途:   用 wifi_http_post_stub.c 替换真实网络, 验证 perception 真实路径:
+ *         每帧都调 MiMo、请求构造、响应解析、3 帧去抖、重试、错误码。
+ *
+ * 依赖:   cJSON (perception.c 真实路径需要)。
+ * 编译 (在 focus_perception 目录下):
+ *   gcc -Wall -Wextra -Werror \
+ *       perception/perception.c tests/wifi_http_post_stub.c tests/test_mimo_cloud.c \
+ *       cJSON.c -I/path/to/cjson -o test_mimo_cloud
+ *   ./test_mimo_cloud
+ *
+ *   (cJSON 是单文件库; openvela 已自带。host 上可 apt install libcjson-dev
+ *    或直接拷一份 cJSON.c/cJSON.h 进仓库。)
+ ****************************************************************************/
+
+#include <stdio.h>
+#include <string.h>
+
+#include "../api/perception.h"
+
+/* 来自 wifi_http_post_stub.c */
+extern int         stub_mimo_call_count;
+extern const char *stub_mimo_response;
+extern int         stub_mimo_fail_first_n;
+
+static int g_checks = 0;
+static int g_fail   = 0;
+
+#define CHECK(cond) do {                                   \
+    g_checks++;                                            \
+    if (!(cond)) {                                         \
+        g_fail++;                                          \
+        printf("  [FAIL] %s (line %d)\n", #cond, __LINE__);\
+    }                                                      \
+} while (0)
+
+static int feq(float a, float b)
+{
+    float d = a - b;
+    if (d < 0) d = -d;
+    return d < 1e-4f;
+}
+
+/* 每帧都调 MiMo + 响应解析 */
+static void test_mimo_parse_and_every_frame(void)
+{
+    printf("== test_mimo_parse_and_every_frame ==\n");
+    stub_mimo_response = NULL;      /* 用默认「玩手机」响应 */
+    stub_mimo_fail_first_n = 0;
+
+    CHECK(perception_init("https://mimo.example/api/v1/detect", "key") == FOCUS_OK);
+
+    uint8_t jpeg[64] = {0};
+    observation_t obs;
+    int before = stub_mimo_call_count;
+
+    /* 连续 5 帧 → MiMo 应被调用 5 次 (每帧都调) */
+    for (int i = 0; i < 5; i++) {
+        CHECK(perception_process(jpeg, sizeof(jpeg), &obs) == FOCUS_OK);
+    }
+    CHECK(stub_mimo_call_count - before == 5);
+
+    /* 单帧解析结果 (去抖窗口未满 3 帧时直接输出) */
+    CHECK(obs.person_present  == true);
+    CHECK(obs.phone_detected  == true);
+    CHECK(obs.phone_near_hand == true);
+    CHECK(feq(obs.person_bbox[0], 0.15f) && feq(obs.person_bbox[1], 0.10f));
+    CHECK(feq(obs.person_bbox[2], 0.70f) && feq(obs.person_bbox[3], 0.85f));
+    CHECK(feq(obs.head_pitch, -25.3f));
+    CHECK(feq(obs.head_yaw, 2.1f));
+    CHECK(feq(obs.hand_motion_score, 0.35f));
+    CHECK(feq(obs.confidence, 0.92f));
+}
+
+/* 失败重试: 前 1 次失败 → 重试成功, 调用次数 +2 */
+static void test_mimo_retry(void)
+{
+    printf("== test_mimo_retry ==\n");
+    perception_init("https://mimo.example/api/v1/detect", "key");
+
+    stub_mimo_fail_first_n = 1;
+    int before = stub_mimo_call_count;
+
+    uint8_t jpeg[64] = {0};
+    observation_t obs;
+    CHECK(perception_process(jpeg, sizeof(jpeg), &obs) == FOCUS_OK);
+    CHECK(stub_mimo_call_count - before == 2);   /* 1 失败 + 1 重试成功 */
+}
+
+/* 错误码: 业务码非 0 / JSON 非法 / 连续失败超时 */
+static void test_mimo_error_codes(void)
+{
+    printf("== test_mimo_error_codes ==\n");
+    uint8_t jpeg[64] = {0};
+    observation_t obs;
+
+    /* 业务码非 0 → NODATA */
+    perception_init("u", "k");
+    stub_mimo_fail_first_n = 0;
+    stub_mimo_response = "{\"code\":1,\"data\":{}}";
+    CHECK(perception_process(jpeg, sizeof(jpeg), &obs) == FOCUS_ERR_PERCEP_NODATA);
+
+    /* JSON 非法 → JSON */
+    stub_mimo_response = "not-a-json";
+    CHECK(perception_process(jpeg, sizeof(jpeg), &obs) == FOCUS_ERR_PERCEP_JSON);
+
+    /* 连续 2 次都失败 (原请求 + 重试) → TIMEOUT */
+    stub_mimo_response = NULL;
+    stub_mimo_fail_first_n = 2;
+    CHECK(perception_process(jpeg, sizeof(jpeg), &obs) == FOCUS_ERR_PERCEP_TIMEOUT);
+}
+
+int main(void)
+{
+    test_mimo_parse_and_every_frame();
+    test_mimo_retry();
+    test_mimo_error_codes();
+
+    printf("\n结果: %d checks, %d failed\n", g_checks, g_fail);
+    return g_fail ? 1 : 0;
+}
