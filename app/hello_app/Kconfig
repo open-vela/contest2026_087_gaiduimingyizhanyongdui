@@ -48,3 +48,10 @@ config CONTEST2026_087_AUDIO_STUB
 	---help---
 		Enable the mock audio backend instead of the real I2S/buzzer
 		driver (hardware/audio_i2s.c).
+config CONTEST2026_087_PERCEPTION_MOCK
+    bool "Perception mock mode"
+    default y
+    help
+        Enable mock mode for perception module.
+        If disabled, the module will call real MiMo cloud API for image recognition.
+        Requires cJSON library when disabled.

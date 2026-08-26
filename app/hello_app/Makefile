@@ -10,38 +10,49 @@ STACKSIZE = 8192
 MODULE    = $(CONFIG_LVX_USE_DEMO_CONTEST2026_087_HELLO_APP)
 
 MAINSRC = hello_app_main.c
-CSRCS   = core/mock.c core/state_machine.c \
+CSRCS += main.c
+CSRCS += perception/perception.c
           behavior/behavior.c behavior/behavior_config.c \
           ui/lcd.c ui/lcd_icons.c ui/mimo.c ui/ui_cjk_font.c ui/ui_draw.c
 
 ifeq ($(CONFIG_CONTEST2026_087_LCD_STUB),y)
-CSRCS  += hardware/lcd_stub.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 else
-CSRCS  += hardware/lcd_st7789.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 endif
 
 ifeq ($(CONFIG_CONTEST2026_087_WIFI_STUB),y)
-CSRCS  += hardware/wifi_stub.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 else
-CSRCS  += hardware/wifi_esp32.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 endif
 
 ifeq ($(CONFIG_CONTEST2026_087_BUTTON_STUB),y)
-CSRCS  += hardware/button_stub.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 else
-CSRCS  += hardware/buttons.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 endif
 
 ifeq ($(CONFIG_CONTEST2026_087_CAMERA_STUB),y)
-CSRCS  += hardware/camera_stub.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 else
-CSRCS  += hardware/camera_ov2640.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 endif
 
 ifeq ($(CONFIG_CONTEST2026_087_AUDIO_STUB),y)
-CSRCS  += hardware/audio_stub.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 else
-CSRCS  += hardware/audio_i2s.c
+CSRCS += main.c
+CSRCS += perception/perception.c
 endif
 
 # 真实硬件驱动 (buttons.c/audio_i2s.c) 依赖 arch 私有 GPIO 头
@@ -49,3 +60,9 @@ endif
 CFLAGS += ${INCDIR_PREFIX}$(TOPDIR)/arch/xtensa/src/esp32s3
 
 include $(APPDIR)/Application.mk
+
+ifeq ($(CONFIG_CONTEST2026_087_PERCEPTION_MOCK),y)
+CFLAGS += -DPERCEPTION_MOCK
+else
+# Real MiMo link: depends on cJSON (provided by openvela, header <cJSON.h>)
+endif
