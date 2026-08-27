@@ -33,7 +33,8 @@
 #include <unistd.h>
 
 #define WIFI_IFNAME    "wlan0"
-#define HTTP_TIMEOUT_SEC  3
+/* MiMo 识图: 上传 base64 图 + 云端推理较慢, 3s 不够, 放宽到 20s */
+#define HTTP_TIMEOUT_SEC  20
 
 /* HTTP 请求鉴权 Key (Authorization: Bearer), wifi_set_http_auth 设置 */
 static char g_http_api_key[80];
@@ -300,33 +301,47 @@ int wifi_http_post(const char *url, const char *body,
                      "Authorization: Bearer %s\r\n", g_http_api_key);
           }
 
+        /* 请求头 (固定小缓冲) 与请求体 (base64 图片, 可达上百 KB) 分开发送,
+         * 避免大 body 塞不进栈上 req[] 返回 FOCUS_ERR_PARAM */
         req_len = snprintf(req, sizeof(req),
                            "POST %s HTTP/1.1\r\n"
                            "Host: %s\r\n"
                            "Content-Type: application/json\r\n"
                            "%s"
                            "Content-Length: %d\r\n"
-                           "Connection: close\r\n\r\n"
-                           "%s",
-                           path, host, auth_hdr, (int)strlen(body), body);
+                           "Connection: close\r\n\r\n",
+                           path, host, auth_hdr, (int)strlen(body));
         if (req_len < 0 || (size_t)req_len >= sizeof(req))
           {
             close(sock);
             return FOCUS_ERR_PARAM;
           }
+
+        if (send(sock, req, req_len, 0) < 0 ||
+            send(sock, body, strlen(body), 0) < 0)
+          {
+            close(sock);
+            if (attempt == 0)
+              {
+                continue;
+              }
+            return FOCUS_ERR_NET_DISCONN;
+          }
       }
 
-      if (send(sock, req, req_len, 0) < 0)
+      /* 循环读响应直至连接关闭 (Connection: close), 避免大响应被截断 */
+      n = 0;
+      while (n < (int)maxlen - 1)
         {
-          close(sock);
-          if (attempt == 0)
+          int r = recv(sock, resp + n, maxlen - 1 - n, 0);
+          if (r <= 0)
             {
-              continue;
+              break;
             }
-          return FOCUS_ERR_NET_DISCONN;
+
+          n += r;
         }
 
-      n = recv(sock, resp, maxlen - 1, 0);
       close(sock);
 
       if (n > 0)

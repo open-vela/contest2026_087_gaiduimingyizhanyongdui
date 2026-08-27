@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "api/error.h"
 #include "api/audio.h"
@@ -278,25 +279,43 @@ int main(int argc, char *argv[])
                 /* 真实: 摄像头采集 RGB565 → 转 JPEG → MiMo 识图 */
                 if (frame != NULL && jpeg_buf != NULL)
                 {
+                    static unsigned cap_seq = 0;
                     size_t fsize = 0;
                     size_t jpeg_size = 320 * 240;
+                    int cret;
+                    int pret;
 
-                    if (camera_capture_frame(frame, &fsize) == FOCUS_OK &&
-                        fsize > 0)
+                    /* 每次采集都在串口打点, 便于真机核对采集/识图节奏 */
+                    printf("[cam] #%u 尝试采集...\n", ++cap_seq);
+                    cret = camera_capture_frame(frame, &fsize);
+                    if (cret == FOCUS_OK && fsize > 0)
                     {
-                        printf("[dbg] cam %u -> jpeg...\n", (unsigned)fsize);
+                        printf("[cam] #%u 采集OK %uB -> 转JPEG...\n",
+                               cap_seq, (unsigned)fsize);
                         if (rgb565_to_jpeg(frame, 320, 240,
                                            jpeg_buf, &jpeg_size) == 0)
                         {
-                            printf("[dbg] jpeg %u -> percep...\n",
-                                   (unsigned)jpeg_size);
-                            perception_process(jpeg_buf, jpeg_size, &obs);
-                            printf("[dbg] percep done\n");
+                            printf("[cam] #%u JPEG %uB -> 云端识图...\n",
+                                   cap_seq, (unsigned)jpeg_size);
+                            pret = perception_process(jpeg_buf, jpeg_size, &obs);
+                            printf("[cam] #%u 识图返回=%d person=%d phone=%d "
+                                   "pitch=%.1f motion=%.2f conf=%.2f\n",
+                                   cap_seq, pret,
+                                   (int)obs.person_present,
+                                   (int)obs.phone_detected,
+                                   obs.head_pitch,
+                                   obs.hand_motion_score,
+                                   obs.confidence);
                         }
                         else
                         {
-                            printf("[dbg] jpeg FAILED\n");
+                            printf("[cam] #%u JPEG 编码失败\n", cap_seq);
                         }
+                    }
+                    else
+                    {
+                        printf("[cam] #%u 采集失败 ret=%d errno=%d\n",
+                               cap_seq, cret, errno);
                     }
                 }
 #endif

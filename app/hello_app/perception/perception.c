@@ -312,12 +312,17 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
      *    失败重试 1 次, 总阻塞 ≤6s (满足开发规范约束) */
     int ret = wifi_http_post(g_api_url, req, g_resp, sizeof(g_resp));
     if (ret < 0) {
+        printf("[percep] MiMo HTTP 首发失败 ret=%d, 重试...\n", ret);
         ret = wifi_http_post(g_api_url, req, g_resp, sizeof(g_resp));
     }
     free(req);
     if (ret < 0) {
+        printf("[percep] MiMo HTTP 失败 ret=%d\n", ret);
         return FOCUS_ERR_PERCEP_TIMEOUT;
     }
+
+    /* HTTP 成功: 打印响应头一截, 便于区分"网络失败"与"解析失败" */
+    printf("[percep] MiMo HTTP OK, resp=%.120s\n", g_resp);
 
     /* 4. 解析响应 → 云端原始结果 */
     return perception_parse_cloud_response(g_resp, raw);
@@ -519,8 +524,16 @@ int perception_process(uint8_t *jpeg, size_t jpeg_len, observation_t *out)
     memset(&raw, 0, sizeof(raw));
     int ret = mimo_detect(jpeg, jpeg_len, &raw);
     if (ret != FOCUS_OK) {
+        printf("[percep] MiMo 识图失败 ret=%d\n", ret);
         return ret;
     }
+
+    /* 云端原始结果打点, 便于真机核对 MiMo 到底识别出了什么 */
+    printf("[percep] MiMo person=%d phone=%d inhand=%d pitch=%.1f "
+           "motion=%.2f conf=%.2f\n",
+           (int)raw.person_detected, (int)raw.phone_detected,
+           (int)raw.phone_in_hand, raw.head_pitch,
+           raw.hand_motion, raw.confidence);
 
     perception_debounce_push(&raw);
     perception_debounce_compute(out, perception_monotonic_ms());
