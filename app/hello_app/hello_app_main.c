@@ -42,15 +42,17 @@ static void init_modules(void)
     session_stats_t initial_stats;
     study_state_t initial_study;
 
-    printf("[perception] init (mock mode)\n");
-    mock_perception_init();
+    /* 真实 perception 接口 (PERCEPTION_MOCK 时内部走 mock, 真实 MiMo 配置后自动切换) */
+    printf("[perception] init\n");
+    perception_init(NULL, NULL);
 
     printf("[behavior]  init mode=STRICT\n");
     behavior_init(MODE_STRICT);
 
-    /* 张沐泽硬件驱动初始化 (stub 模式为 no-op, 真实模式配置 GPIO/I2S) */
+    /* 张沐泽硬件驱动初始化 (stub 模式为 no-op, 真实模式配置 GPIO/I2S/摄像头) */
     button_init();
     audio_init();
+    camera_init();
 
     if (lcd_init() == FOCUS_OK)
     {
@@ -231,7 +233,7 @@ int main(int argc, char *argv[])
     printf("    ui             - 郭黄亦昕 (已集成)\n");
     printf("    behavior       - 赵思涵时序引擎\n");
     printf("    button/audio/camera/wifi - 张沐泽真实驱动\n");
-    printf("    perception     - mock (待周礼航)\n");
+    printf("    perception     - 周礼航感知 (mock 或真实 MiMo)\n");
     printf("  子命令: hello_app hwbutton|hwaudio|hwcamera|hwwifi <ssid> <pass>\n");
     printf("==================================================\n\n");
 
@@ -239,14 +241,53 @@ int main(int argc, char *argv[])
     init_modules();
     state_machine_init();
 
-    printf("[core] 进入主循环 (state_machine_tick @ 10Hz)...\n");
-    printf("[core] 真实按键驱动: 长按进模式选择, 短按开始, 超长按停止\n\n");
-
-    /* ---- 主循环: state_machine_tick 驱动 ---- */
-    for (;;)
+    /* ---- 摄像头/感知帧缓冲 (PSRAM heap, 主循环复用) ---- */
     {
-        state_machine_tick();
-        usleep(100 * 1000);  /* 100ms = 10Hz */
+        uint8_t *frame = malloc(320 * 240 * 2);
+        observation_t obs;
+        int frame_tick = 0;
+
+        memset(&obs, 0, sizeof(obs));
+        if (frame == NULL)
+        {
+            printf("[core] 帧缓冲分配失败, 感知暂停\n");
+        }
+
+        printf("[core] 进入主循环: 状态机 @10Hz + 感知 @5s/帧...\n");
+        printf("[core] 真实按键: 长按进模式选择, 短按开始, 超长按停止\n\n");
+
+        /* ---- 主循环: state_machine + 感知驱动 ---- */
+        for (;;)
+        {
+            state_machine_tick();   /* 内部 behavior_analyze 消费感知历史 */
+
+            /* 每 50 tick (5s) 采一帧喂感知, 更新 history 供行为引擎 */
+            if (++frame_tick >= 50)
+            {
+                frame_tick = 0;
+#ifdef PERCEPTION_MOCK
+                /* mock: 假帧驱动 (perception 内部走 mock_observation) */
+                if (frame != NULL)
+                {
+                    memset(frame, 0, 64);
+                    perception_process(frame, 64, &obs);
+                }
+#else
+                /* 真实: 摄像头采集真帧 → MiMo 识图 */
+                if (frame != NULL)
+                {
+                    size_t fsize = 0;
+                    if (camera_capture_frame(frame, &fsize) == FOCUS_OK &&
+                        fsize > 0)
+                    {
+                        perception_process(frame, fsize, &obs);
+                    }
+                }
+#endif
+            }
+
+            usleep(100 * 1000);  /* 100ms = 10Hz */
+        }
     }
 
     return EXIT_SUCCESS;
