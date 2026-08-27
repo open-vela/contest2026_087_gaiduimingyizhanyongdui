@@ -81,6 +81,7 @@ static void init_modules(void)
 #include "api/camera.h"
 #include "api/wifi.h"
 #include "api/audio.h"
+#include "core/rgb565_jpeg.h"
 #include <netutils/netlib.h>
 
 /* `hello_app hwbutton`: 真实按键事件测试 (10s) */
@@ -273,14 +274,21 @@ int main(int argc, char *argv[])
                     perception_process(frame, 64, &obs);
                 }
 #else
-                /* 真实: 摄像头采集真帧 → MiMo 识图 */
+                /* 真实: 摄像头采集 RGB565 → 转 JPEG → MiMo 识图 */
                 if (frame != NULL)
                 {
+                    static uint8_t jpeg_buf[320 * 240];
                     size_t fsize = 0;
+                    size_t jpeg_size = sizeof(jpeg_buf);
+
                     if (camera_capture_frame(frame, &fsize) == FOCUS_OK &&
                         fsize > 0)
                     {
-                        perception_process(frame, fsize, &obs);
+                        if (rgb565_to_jpeg(frame, 320, 240,
+                                           jpeg_buf, &jpeg_size) == 0)
+                        {
+                            perception_process(jpeg_buf, jpeg_size, &obs);
+                        }
                     }
                 }
 #endif
