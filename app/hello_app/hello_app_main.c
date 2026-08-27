@@ -284,10 +284,18 @@ int main(int argc, char *argv[])
                     if (camera_capture_frame(frame, &fsize) == FOCUS_OK &&
                         fsize > 0)
                     {
+                        printf("[dbg] cam %u -> jpeg...\n", (unsigned)fsize);
                         if (rgb565_to_jpeg(frame, 320, 240,
                                            jpeg_buf, &jpeg_size) == 0)
                         {
+                            printf("[dbg] jpeg %u -> percep...\n",
+                                   (unsigned)jpeg_size);
                             perception_process(jpeg_buf, jpeg_size, &obs);
+                            printf("[dbg] percep done\n");
+                        }
+                        else
+                        {
+                            printf("[dbg] jpeg FAILED\n");
                         }
                     }
                 }
