@@ -1,6 +1,6 @@
 # FOCUS AIoT - 成员任务安排
 
-> 更新: 2026-08-19 | 负责人: 万思源
+> 更新: 2026-08-27 | 负责人: 万思源
 > 前提: 接口已冻结 (`api/*.h`), 状态机/LCD/UI/行为引擎/硬件全栈已完成。
 
 ## 当前完成状态
@@ -13,6 +13,7 @@
 | hardware/lcd_st7789.c | 张沐泽 | ✅ 已合并, 真机验证通过 |
 | behavior/ (时序引擎+配置表+单测) | 赵思涵 | ✅ 已合并, 单测 100% 通过 |
 | hardware/ 全栈 (按键/WiFi/摄像头/音频) | 张沐泽 | ✅ **真机核验 100% 通过** (PR #10) |
+| perception/ (MiMo 云端识图) | 周礼航 | ✅ **真机链路打通** (PR #14) |
 
 **关键衔接**: `core/mock.c` 已提供 **weak `perception_get_history()`** 临时历史提供器,
 真实感知模块接入后由强符号自动覆盖 (和 LCD stub 相同的替换机制)。行为引擎当前直接
@@ -20,8 +21,11 @@
 
 **硬件驱动状态 (2026-08-19 真机核验完成)**:
 - LCD ✅ 上屏 / 按键 ✅ 长短按 / 音频 ✅ LED 降级 (板载无蜂鸣器)
-- 摄像头 ✅ RGB565 采帧 (驱动为单帧模式, 逐帧触发) / WiFi ✅ 连接+DHCP+HTTP POST
+- 摄像头 ✅ RGB565 采帧 / WiFi ✅ 连接+DHCP+HTTP POST
 - 真机核验修复: camera 格式/缓冲、wifi ioctl 流程、audio 降级等, 见 PR #10
+
+**全链路状态 (2026-08-27 真机验证)**: 摄像头 → TinyJPEG → HTTP 中继 → MiMo 识图 → 行为/FSM
+**已跑通**, 实测识别出人物并跟踪头部俯仰角 (`person=1 pitch=±(随动作变化)`)。见 PR #13/#14。
 
 ---
 
@@ -71,56 +75,60 @@
 
 ---
 
-## 二、周礼航 - 视觉感知 (`perception/`) ⭐ 当前焦点
+## 二、周礼航 - 视觉感知 (`perception/`) ✅ 已实现
 
-**任务**: 实现 `api/perception.h` 三个函数, 从图片输出 `observation_t`。
+**任务**: 实现 `api/perception.h` 三个函数, 从图片输出 `observation_t`。已完成。
 
-### 📁 要写的文件
+### 📁 文件
 
 ```
-perception/perception.c          ← 主实现 (三函数)
-perception/perception.h          ← 内部声明 (可选)
-tests/test_perception.c          ← 独立测试 (可选, 参考 test_behavior.c 模式)
+perception/perception.c          ← 主实现 (三函数, 真实 MiMo 链路)
+perception/perception_internal.h ← 内部声明
 ```
 
-### 函数实现细化
+### 真实云端链路 (MiMo, 经 HTTP 中继)
 
-**① `perception_init(api_url, api_key)`**
-- static 保存 url/key (如 g_api_url/g_api_key)
-- 清零历史缓冲 + 计数器
-- 返回 FOCUS_OK
-
-**② `perception_process(jpeg, jpeg_len, out)`** — 核心
-
-阶段 1 (mock, 先联调):
-- 不调云端, 用固定规则: 根据 jpeg_len 或预设序列轮流输出
-  FOCUSED/PLAYING_PHONE/AWAY/DROWSY 对应的 observation_t
-- 这样赵思涵/万思源能立刻联调
-
-阶段 2 (真实云端):
+设备无 TLS 栈无法直连 https 的 MiMo, 走 **HTTP 中继**:
 ```
-base64_encode(jpeg, jpeg_len, b64)     // 320x240 JPEG ≈ 30KB → b64 ≈ 40KB
-构造 JSON: {"image":"<b64>","width":320,"height":240}
-wifi_http_post(api_url, json, resp, 4096)   // 张沐泽的, ≤6s
-cJSON 解析 resp
-填充 observation_t
+设备 --http--> 中继(106.15.192.201:8060, tools/mimo_relay.py) --https--> MiMo
 ```
 
-**③ `perception_get_history(buf, n)`**
-- 环形缓冲区 `obs_history[60]`, 每条约 40 字节 → 2.4KB
+`perception_process(jpeg, jpeg_len, out)` 真实路径:
+```
+base64_encode(jpeg, jpeg_len, b64)              // JPEG 60-160KB → b64
+构造 OpenAI chat/completions 请求 (model=mimo-v2.5,
+  image_url = "data:image/jpeg;base64,<b64>", max_completion_tokens=2048)
+wifi_http_post(中继地址, req, resp, 16384)      // 60s 超时
+跳过 HTTP 头 (\r\n\r\n) → cJSON 解析外层 choices[0].message.content
+提取第一个 { 到最后一个 } → cJSON 填充 cloud_result_t
+3 帧去抖 → observation_t
+```
+
+### 真机联调踩坑 (已修复, 见 PR #14)
+
+- **prompt 含字面 JSON 引号** → 请求变非法 JSON, MiMo 400。改纯文字描述字段。
+- **wifi_http_post 返回含 HTTP 头的完整响应** → 解析前剥离 `\r\n\r\n`。
+- **响应缓冲 4096 太小** → MiMo 推理长时截断末尾 JSON, 加大到 16KB。
+- **max_completion_tokens=800 不够** → 推理吃满时 content 空, 改 2048。
+- **HTTP 超时 20s 不够** → 推理慢时设备先超时, 改 60s。
+- **TinyJPEG 输出可超 76800** → JPEG 缓冲 3×, 溢出显式报错。
+
+### ③ `perception_get_history(buf, n)`
+- 环形缓冲区 `obs_history[60]`
 - 从旧到新拷贝 (取最近的 n 条)
 - 返回实际条数
 
-### 云端 API 协议 (已冻结, 见规范)
+### 云端 API 协议 (实际: MiMo OpenAI chat/completions)
 
 ```
-POST /api/v1/detect
-Request:  {"image":"<base64>","width":320,"height":240}
-Response: {"code":0,"data":{
-            "person":{"detected":true,"bbox":[0.15,0.10,0.70,0.85]},
-            "phone":{"detected":true,"near_hand":true},
-            "head_pose":{"pitch":-25.3,"yaw":2.1},
-            "hand_motion_score":0.35,"confidence":0.92}}
+POST http://<中继>:8060/v1/chat/completions   (中继转 https 到 token-plan-cn.xiaomimimo.com)
+Request:  {"model":"mimo-v2.5","max_completion_tokens":2048,"messages":[
+            {"role":"system","content":"You are MiMo, an AI assistant developed by Xiaomi."},
+            {"role":"user","content":[
+              {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,<b64>"}},
+              {"type":"text","text":"<prompt>"}]}]}
+Response: {"choices":[{"message":{"content":"<JSON: person_present/phone_detected/...>"}}]}
+```
 ```
 
 ### 去抖 (阶段 2)
@@ -138,11 +146,23 @@ Response: {"code":0,"data":{
 
 ### 关键约束
 
-- 摄像头是**单帧模式**: 用 `V4L2_BUF_TYPE_STILL_CAPTURE` + `VIDIOC_TAKEPICT_START` 逐帧触发。
-  张沐泽已提供 `camera_capture_frame()` (RGB565), 如需要 JPEG 请按规范走 STILL_CAPTURE。
-- HTTP 超时 ≤6s, JSON 缺字段不崩 (cJSON 判空)。
+- 摄像头逐帧触发: `camera_capture_frame()` (RGB565) + TinyJPEG 转 JPEG (见 `core/rgb565_jpeg.c`)。
+- HTTP 超时 60s (推理慢), JSON 缺字段不崩 (cJSON 判空)。
 - **不区分严格/鼓励模式** (那是赵思涵的事)。
 - 失败返回: `FOCUS_ERR_PERCEP_TIMEOUT(-30)` / `FOCUS_ERR_PERCEP_JSON(-31)` / `FOCUS_ERR_PERCEP_NODATA(-32)`
+
+### 中继部署 (tools/mimo_relay.py, 租用服务器)
+
+```bash
+RELAY_TOKEN=<设备端 Authorization 令牌> \
+MIMO_API_KEY=<MiMo key> \
+PORT=8060 \
+nohup python3 /root/mimo_relay.py > /root/relay.log 2>&1 &
+```
+
+- 放行安全组 8060 入方向 (TCP / 0.0.0.0/0)。
+- 必须用 `ThreadingHTTPServer` (单线程在 MiMo 慢请求时接收队列积压丢 SYN)。
+- 设备端 endpoint/token 在 `perception.c` 的 `MIMO_ENDPOINT_DEFAULT` / `MIMO_API_KEY_DEFAULT`。
 
 ### 编译接入
 
@@ -154,8 +174,8 @@ Response: {"code":0,"data":{
 
 - `perception_process()` 返回有效 observation (mock + 真实双路径)。
 - `perception_get_history()` 返回历史, 时间戳递增。
-- 云端失败返回错误码, 不阻塞 >6s。
-- 真机: `hello_app` 主循环 behavior 消费真实 history 而非 mock。
+- 云端失败返回错误码, 不阻塞 >60s。
+- 真机: `hello_app` 主循环 behavior 消费真实 history 而非 mock (PR #14 已打通)。
 
 ---
 
