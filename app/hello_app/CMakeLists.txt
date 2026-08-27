@@ -4,6 +4,7 @@ if(CONFIG_LVX_USE_DEMO_CONTEST2026_087_HELLO_APP)
     hello_app_main.c
     core/mock.c
     core/state_machine.c
+    core/rgb565_jpeg.c
     behavior/behavior.c
     behavior/behavior_config.c
     ui/lcd.c
