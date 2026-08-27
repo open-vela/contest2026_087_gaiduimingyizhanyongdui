@@ -37,31 +37,15 @@
 #include "perception_internal.h"
 
 /* ======================================================================
- * 返回码定义（临时，后续应移到公共头文件）
+ * 错误码统一使用 api/error.h (FOCUS_ERR_PERCEP_* = -30/-31/-32)
  * ====================================================================== */
-#ifndef FOCUS_OK
-#define FOCUS_OK                            0
-#endif
+#include "../api/error.h"
 
-#ifndef FOCUS_ERR_PERCEP_PARAM
-#define FOCUS_ERR_PERCEP_PARAM             -1
-#endif
-
-#ifndef FOCUS_ERR_PERCEP_TIMEOUT
-#define FOCUS_ERR_PERCEP_TIMEOUT           -2
-#endif
-
-#ifndef FOCUS_ERR_PERCEP_JSON
-#define FOCUS_ERR_PERCEP_JSON              -3
-#endif
-
-#ifndef FOCUS_ERR_PERCEP_NODATA
-#define FOCUS_ERR_PERCEP_NODATA            -4
-#endif
-/* ====================================================================== */
+/* 参数错误: error.h 统一用 FOCUS_ERR_PARAM (-2) */
+#define FOCUS_ERR_PERCEP_PARAM   FOCUS_ERR_PARAM
 
 #ifndef PERCEPTION_MOCK
-#include <cJSON.h>
+#include <netutils/cJSON.h>
 /* 张沐泽提供, 见 api/wifi.h (前向声明, 避免独立编译依赖) */
 int wifi_http_post(const char *url, const char *body, char *resp, size_t maxlen);
 #endif

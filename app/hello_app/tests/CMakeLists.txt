@@ -31,3 +31,16 @@ if(NOT WIN32)
     -Wall -Wextra -Werror)
 endif()
 add_test(NAME focus_aiot_behavior_tests COMMAND focus_aiot_behavior_tests)
+
+add_executable(focus_aiot_perception_tests
+  test_perception.c
+  ../perception/perception.c)
+target_include_directories(focus_aiot_perception_tests PRIVATE
+  ../api)
+target_compile_definitions(focus_aiot_perception_tests PRIVATE
+  PERCEPTION_MOCK)
+if(NOT WIN32)
+  target_compile_options(focus_aiot_perception_tests PRIVATE
+    -Wall -Wextra -Werror)
+endif()
+add_test(NAME focus_aiot_perception_tests COMMAND focus_aiot_perception_tests)
