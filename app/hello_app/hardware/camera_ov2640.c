@@ -33,6 +33,12 @@
 #define CAMERA_DEV      "/dev/video0"
 #define CAMERA_WIDTH    320
 #define CAMERA_HEIGHT   240
+/* 内核 esp32s3_cam 驱动每轮 STREAMON 只采 1 帧就停 (ISR 置 capturing=false)。
+ * V4L2 RING 判据是 vbuf_top != vbuf_next 才算有数据, 因此 BUFCOUNT 必须 ≥2
+ * (=1 时自环, DQBUF 永久阻塞)。
+ * 但 ≥2 时未消费的缓冲容器会残留在 RING 队列, 下次 QBUF 拿不到容器
+ * 返回 -ENOMEM。解决: 每轮采集前用 REQBUFS 换一次 count 强制重建容器链
+ * (见 camera_capture_frame)。 */
 #define CAMERA_BUFCOUNT 2
 #define CAMERA_BUFSIZE  (CAMERA_WIDTH * CAMERA_HEIGHT * 2)  /* RGB565 全尺寸 */
 #define CAMERA_FRAME_TIMEOUT_MS 500   /* 单帧采集超时上限 */
@@ -113,6 +119,7 @@ int camera_init(void)
 int camera_capture_frame(uint8_t *buf, size_t *size)
 {
   struct v4l2_buffer vbuf;
+  struct v4l2_requestbuffers req;
   struct pollfd pfd;
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   int pr;
@@ -122,9 +129,21 @@ int camera_capture_frame(uint8_t *buf, size_t *size)
       return FOCUS_ERR_HW_NOTREADY;
     }
 
-  /* 入队全部缓冲 (RING 模式需环完整, 否则 DQBUF 阻塞) */
+  /* 重置 RING 缓冲链: 驱动每轮只采 1 帧, 未消费的缓冲容器残留在队列,
+   * 下次 QBUF 拿不到容器返回 -ENOMEM。REQBUFS 换一次 count 触发
+   * video_framebuff_realloc_container → init_buf_chain 重建 (全部回空闲)。 */
   {
     int i;
+    memset(&req, 0, sizeof(req));
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_USERPTR;
+    req.mode  = V4L2_BUF_MODE_RING;
+    req.count = CAMERA_BUFCOUNT + 1;   /* 先换计数 → 强制重建容器链 */
+    ioctl(g_camera_fd, VIDIOC_REQBUFS, (unsigned long)&req);
+    req.count = CAMERA_BUFCOUNT;       /* 恢复实际缓冲数 */
+    ioctl(g_camera_fd, VIDIOC_REQBUFS, (unsigned long)&req);
+
+    /* 入队全部缓冲 (RING 模式需环完整, 否则 DQBUF 阻塞) */
     for (i = 0; i < CAMERA_BUFCOUNT; i++)
       {
         memset(&vbuf, 0, sizeof(vbuf));
