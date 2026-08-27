@@ -33,8 +33,9 @@
 #include <unistd.h>
 
 #define WIFI_IFNAME    "wlan0"
-/* MiMo 识图: 上传 base64 图 + 云端推理较慢, 3s 不够, 放宽到 20s */
-#define HTTP_TIMEOUT_SEC  20
+/* MiMo 识图: 上传 base64 图 + 云端推理可能 >20s (推理吃满 token),
+ * 放宽到 60s 避免响应稍慢就误判超时 */
+#define HTTP_TIMEOUT_SEC  60
 
 /* HTTP 请求鉴权 Key (Authorization: Bearer), wifi_set_http_auth 设置 */
 static char g_http_api_key[80];

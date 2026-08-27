@@ -58,26 +58,32 @@ void wifi_set_http_auth(const char *api_key);
 #define FRAME_WIDTH     320
 #define FRAME_HEIGHT    240
 #define MAX_JPEG_SIZE   (50 * 1024)     /* 320x240 JPEG 上限 */
-#define RESP_BUF_SIZE   4096            /* MiMo 响应缓冲 */
+/* MiMo 响应缓冲: mimo-v2.5 推理 (reasoning_content) 很长, 响应可达
+ * 6-8KB, 4096 会截断末尾 JSON 导致解析失败, 需 ≥16KB */
+#define RESP_BUF_SIZE   16384           /* MiMo 响应缓冲 */
 
 /* MiMo 识图 endpoint 与鉴权 key。
  * 优先级: perception_init() 传入 > 下面的默认值。
- * TODO: 把 endpoint 填成 MiMo 真实地址; key 按鉴权方式填 (契约未体现
- *       auth 字段, 若需 Authorization header 请与张沐泽确认 wifi_http_post
- *       是否支持自定义 header, g_api_key 暂作预留)。 */
-#define MIMO_ENDPOINT_DEFAULT   "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
-#define MIMO_API_KEY_DEFAULT    "tp-cqhvcy96byytd23azumypy2925bpmilukor7fp3k2tu8h5ew"
+ *
+ * 设备无 TLS 栈, 无法直连 https 的 MiMo。经中继 (tools/mimo_relay.py,
+ * 部署在租用服务器 106.15.192.201:8060) 转发:
+ *   设备 --http--> 中继 --https--> MiMo
+ * endpoint 填中继地址; key 填中继访问令牌 RELAY_TOKEN
+ * (wifi_set_http_auth 设成 Authorization: Bearer <token>)。 */
+#define MIMO_ENDPOINT_DEFAULT   "http://106.15.192.201:8060/v1/chat/completions"
+#define MIMO_API_KEY_DEFAULT    "focus087relay"
 #define MIMO_MODEL              "mimo-v2.5"
 
-/* 提示 MiMo 输出结构化 JSON (学习专注场景分析) */
+/* 提示 MiMo 输出结构化 JSON (学习专注场景分析)。
+ * ⚠️ 该字符串经 snprintf 直接嵌入请求 JSON (未做 JSON 转义), 因此
+ *    绝不能含 " { } 等 JSON 结构字符 —— 否则整个请求变非法 JSON,
+ *    云端返回 400 Invalid JSON (曾因字面 JSON 示例踩坑)。用文字描述字段。 */
 #define MIMO_PROMPT \
-  "你是学习专注监测AI。分析图片中学习者的状态，只输出一个JSON对象，不要输出其他任何文本。JSON格式: " \
-  "{\"person_present\":bool,\"person_bbox\":[x,y,w,h],\"phone_detected\":bool," \
-  "\"phone_near_hand\":bool,\"head_pitch\":float,\"head_yaw\":float," \
-  "\"hand_motion_score\":float,\"confidence\":float}. " \
-  "含义: person_present=是否有人; phone_detected=是否检测到手机; " \
-  "phone_near_hand=手机是否在手部附近; head_pitch=头部俯仰角(度,负=低头); " \
-  "hand_motion_score=手部运动量(0-1); confidence=置信度(0-1)。"
+  "你是学习专注监测AI。分析图片中学习者的状态，只输出一个JSON对象，不要输出其他任何文本。" \
+  "JSON字段: person_present(bool,是否有人), person_bbox(数组x,y,w,h,归一化), " \
+  "phone_detected(bool,是否检测到手机), phone_near_hand(bool,手机是否在手部附近), " \
+  "head_pitch(float,头部俯仰角,负=低头), head_yaw(float,头部偏转角), " \
+  "hand_motion_score(float,0到1,手部运动量), confidence(float,0到1,置信度)。"
 
 /* ------------------------------------------------------------------ */
 /* 模块状态 (单例; 该模块由 wifi_task 串行调用, 无重入)                */
@@ -298,7 +304,7 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
         return FOCUS_ERR_PERCEP_PARAM;
     }
     snprintf(req, req_cap,
-             "{\"model\":\"%s\",\"max_completion_tokens\":800,"
+             "{\"model\":\"%s\",\"max_completion_tokens\":2048,"
              "\"messages\":["
              "{\"role\":\"system\",\"content\":\"You are MiMo, an AI assistant "
              "developed by Xiaomi.\"},"
@@ -348,7 +354,17 @@ int perception_parse_cloud_response(const char *resp, cloud_result_t *out)
         return FOCUS_ERR_PERCEP_JSON;
     }
 
-    root = cJSON_Parse(resp);
+    /* wifi_http_post 返回的是完整 HTTP 响应 (含状态行+头+body),
+     * cJSON 只认 body。跳过 "\r\n\r\n" 之后的部分再解析。 */
+    s = resp;
+    {
+        const char *hdr_end = strstr(s, "\r\n\r\n");
+        if (hdr_end != NULL) {
+            s = hdr_end + 4;
+        }
+    }
+
+    root = cJSON_Parse(s);
     if (!root) {
         return FOCUS_ERR_PERCEP_JSON;
     }
@@ -524,7 +540,14 @@ int perception_process(uint8_t *jpeg, size_t jpeg_len, observation_t *out)
     memset(&raw, 0, sizeof(raw));
     int ret = mimo_detect(jpeg, jpeg_len, &raw);
     if (ret != FOCUS_OK) {
-        printf("[percep] MiMo 识图失败 ret=%d\n", ret);
+        /* 打印响应 body (跳过 HTTP 头), 便于定位解析失败原因 */
+        const char *b = g_resp;
+        const char *he = strstr(b, "\r\n\r\n");
+        if (he != NULL) {
+            b = he + 4;
+        }
+
+        printf("[percep] MiMo 识图失败 ret=%d body=%.240s\n", ret, b);
         return ret;
     }
 
