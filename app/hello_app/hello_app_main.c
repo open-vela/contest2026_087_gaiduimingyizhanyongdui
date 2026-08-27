@@ -244,12 +244,13 @@ int main(int argc, char *argv[])
 
     /* ---- 摄像头/感知帧缓冲 (PSRAM heap, 主循环复用) ---- */
     {
-        uint8_t *frame = malloc(320 * 240 * 2);
+        uint8_t *frame = malloc(320 * 240 * 2);   /* RGB565 帧 */
+        uint8_t *jpeg_buf = malloc(320 * 240);    /* JPEG 输出 */
         observation_t obs;
         int frame_tick = 0;
 
         memset(&obs, 0, sizeof(obs));
-        if (frame == NULL)
+        if (frame == NULL || jpeg_buf == NULL)
         {
             printf("[core] 帧缓冲分配失败, 感知暂停\n");
         }
@@ -275,11 +276,10 @@ int main(int argc, char *argv[])
                 }
 #else
                 /* 真实: 摄像头采集 RGB565 → 转 JPEG → MiMo 识图 */
-                if (frame != NULL)
+                if (frame != NULL && jpeg_buf != NULL)
                 {
-                    static uint8_t jpeg_buf[320 * 240];
                     size_t fsize = 0;
-                    size_t jpeg_size = sizeof(jpeg_buf);
+                    size_t jpeg_size = 320 * 240;
 
                     if (camera_capture_frame(frame, &fsize) == FOCUS_OK &&
                         fsize > 0)
