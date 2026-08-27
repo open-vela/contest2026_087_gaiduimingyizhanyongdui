@@ -246,7 +246,10 @@ int main(int argc, char *argv[])
     /* ---- 摄像头/感知帧缓冲 (PSRAM heap, 主循环复用) ---- */
     {
         uint8_t *frame = malloc(320 * 240 * 2);   /* RGB565 帧 */
-        uint8_t *jpeg_buf = malloc(320 * 240);    /* JPEG 输出 */
+        /* JPEG 输出: 必须 ≥ 3×帧大小。TinyJPEG quality=2 细节多时
+         * 输出可超 width*height (实测噪声帧约 2.8×), 太小会截断丢
+         * EOI 标记, MiMo 解码 400。 */
+        uint8_t *jpeg_buf = malloc(320 * 240 * 3);
         observation_t obs;
         int frame_tick = 0;
 
@@ -281,7 +284,7 @@ int main(int argc, char *argv[])
                 {
                     static unsigned cap_seq = 0;
                     size_t fsize = 0;
-                    size_t jpeg_size = 320 * 240;
+                    size_t jpeg_size = 320 * 240 * 3;
                     int cret;
                     int pret;
 

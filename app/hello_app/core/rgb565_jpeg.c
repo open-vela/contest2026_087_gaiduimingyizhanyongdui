@@ -21,6 +21,7 @@ typedef struct
   uint8_t *buf;    /* 输出缓冲区 */
   size_t   cap;    /* 容量 */
   size_t   used;   /* 已写字节 */
+  int      overflowed;  /* 输出超出容量 (会截断, 上层需扩大缓冲) */
 } jpeg_sink_t;
 
 static void jpeg_write_cb(void *context, void *data, int size)
@@ -31,6 +32,11 @@ static void jpeg_write_cb(void *context, void *data, int size)
     {
       memcpy(sink->buf + sink->used, data, (size_t)size);
       sink->used += (size_t)size;
+    }
+  else
+    {
+      /* 溢出: 丢弃并标记。静默截断会丢 JPEG 的 EOI 标记, 云端解码 400。 */
+      sink->overflowed = 1;
     }
 }
 
@@ -73,17 +79,20 @@ int rgb565_to_jpeg(const uint8_t *rgb565, int width, int height,
       rgb[i * 3 + 2] = (uint8_t)((b5 << 3) | (b5 >> 2));   /* B */
     }
 
-  /* TinyJPEG 编码 (quality 2: 很好, 约 1/2 尺寸) */
-  sink.buf  = jpeg_out;
-  sink.cap  = *jpeg_size;
-  sink.used = 0;
+  /* TinyJPEG 编码 (quality 2: 很好, 约 1/2 尺寸)。
+   * 注意: 细节多的帧输出可能 > width*height (实测噪声帧约 2.8×),
+   * 调用方缓冲必须给足, 否则截断丢 EOI 标记, 云端解码 400。 */
+  sink.buf        = jpeg_out;
+  sink.cap        = *jpeg_size;
+  sink.used       = 0;
+  sink.overflowed = 0;
 
   ok = tje_encode_with_func(jpeg_write_cb, &sink, 2,
                             width, height, 3, rgb);
 
   free(rgb);
 
-  if (!ok)
+  if (!ok || sink.overflowed)
     {
       return -1;
     }
