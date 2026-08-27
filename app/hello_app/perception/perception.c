@@ -48,6 +48,7 @@
 #include <netutils/cJSON.h>
 /* 张沐泽提供, 见 api/wifi.h (前向声明, 避免独立编译依赖) */
 int wifi_http_post(const char *url, const char *body, char *resp, size_t maxlen);
+void wifi_set_http_auth(const char *api_key);
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -64,8 +65,19 @@ int wifi_http_post(const char *url, const char *body, char *resp, size_t maxlen)
  * TODO: 把 endpoint 填成 MiMo 真实地址; key 按鉴权方式填 (契约未体现
  *       auth 字段, 若需 Authorization header 请与张沐泽确认 wifi_http_post
  *       是否支持自定义 header, g_api_key 暂作预留)。 */
-#define MIMO_ENDPOINT_DEFAULT   ""
-#define MIMO_API_KEY_DEFAULT    ""
+#define MIMO_ENDPOINT_DEFAULT   "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
+#define MIMO_API_KEY_DEFAULT    "tp-cqhvcy96byytd23azumypy2925bpmilukor7fp3k2tu8h5ew"
+#define MIMO_MODEL              "mimo-v2.5"
+
+/* 提示 MiMo 输出结构化 JSON (学习专注场景分析) */
+#define MIMO_PROMPT \
+  "你是学习专注监测AI。分析图片中学习者的状态，只输出一个JSON对象，不要输出其他任何文本。JSON格式: " \
+  "{\"person_present\":bool,\"person_bbox\":[x,y,w,h],\"phone_detected\":bool," \
+  "\"phone_near_hand\":bool,\"head_pitch\":float,\"head_yaw\":float," \
+  "\"hand_motion_score\":float,\"confidence\":float}. " \
+  "含义: person_present=是否有人; phone_detected=是否检测到手机; " \
+  "phone_near_hand=手机是否在手部附近; head_pitch=头部俯仰角(度,负=低头); " \
+  "hand_motion_score=手部运动量(0-1); confidence=置信度(0-1)。"
 
 /* ------------------------------------------------------------------ */
 /* 模块状态 (单例; 该模块由 wifi_task 串行调用, 无重入)                */
@@ -268,15 +280,33 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
         return FOCUS_ERR_PERCEP_PARAM;
     }
 
-    /* 2. 构造请求体 (契约: {"image":"<base64>","width":320,"height":240}) */
-    size_t req_cap = b64_len + 96;
-    char *req = malloc(req_cap);
-    if (!req) {
+    /* 2. 构造 OpenAI chat/completions 请求体:
+     *    model + messages(system + user[image_url base64, text prompt]) */
+    size_t img_len = strlen("data:image/jpeg;base64,") + b64_len;
+    char *img = malloc(img_len + 1);
+    if (!img) {
         free(b64);
         return FOCUS_ERR_PERCEP_PARAM;
     }
-    snprintf(req, req_cap, "{\"image\":\"%s\",\"width\":%d,\"height\":%d}",
-             b64, FRAME_WIDTH, FRAME_HEIGHT);
+    snprintf(img, img_len + 1, "data:image/jpeg;base64,%s", b64);
+    free(b64);
+
+    size_t req_cap = img_len + sizeof(MIMO_PROMPT) + 256;
+    char *req = malloc(req_cap);
+    if (!req) {
+        free(img);
+        return FOCUS_ERR_PERCEP_PARAM;
+    }
+    snprintf(req, req_cap,
+             "{\"model\":\"%s\",\"max_completion_tokens\":800,"
+             "\"messages\":["
+             "{\"role\":\"system\",\"content\":\"You are MiMo, an AI assistant "
+             "developed by Xiaomi.\"},"
+             "{\"role\":\"user\",\"content\":["
+             "{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}},"
+             "{\"type\":\"text\",\"text\":\"%s\"}]}]}",
+             MIMO_MODEL, img, MIMO_PROMPT);
+    free(img);
 
     /* 3. HTTP POST: 单次超时由 wifi_http_post 保证 ≤3s;
      *    失败重试 1 次, 总阻塞 ≤6s (满足开发规范约束) */
@@ -284,7 +314,6 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
     if (ret < 0) {
         ret = wifi_http_post(g_api_url, req, g_resp, sizeof(g_resp));
     }
-    free(b64);
     free(req);
     if (ret < 0) {
         return FOCUS_ERR_PERCEP_TIMEOUT;
@@ -294,67 +323,91 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
     return perception_parse_cloud_response(g_resp, raw);
 }
 
-/* MiMo 响应解析 (契约: code==0 且 data 为对象; 所有字段判空不崩) */
+/* MiMo 响应解析 (OpenAI chat/completions 格式):
+ *   外层 {choices:[{message:{content:"<JSON文本>"}}]},
+ *   content 为模型输出的 JSON 字符串 → cloud_result_t。 */
 int perception_parse_cloud_response(const char *resp, cloud_result_t *out)
 {
+    const char *s;
+    const char *start;
+    const char *end;
+    char buf[512];
+    size_t len;
+    cJSON *inner;
+    cJSON *root;
+    cJSON *choices;
+    cJSON *msg;
+    cJSON *content;
+
     if (!resp || !out) {
         return FOCUS_ERR_PERCEP_JSON;
     }
 
-    cJSON *root = cJSON_Parse(resp);
+    root = cJSON_Parse(resp);
     if (!root) {
         return FOCUS_ERR_PERCEP_JSON;
     }
 
-    cJSON *code = cJSON_GetObjectItem(root, "code");
-    if (cJSON_IsNumber(code) && code->valueint != 0) {
+    /* 取 choices[0].message.content */
+    choices = cJSON_GetObjectItem(root, "choices");
+    if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
         cJSON_Delete(root);
-        return FOCUS_ERR_PERCEP_NODATA;   /* 业务码非 0: 无人/无数据 */
+        return FOCUS_ERR_PERCEP_NODATA;
     }
-
-    cJSON *data = cJSON_GetObjectItem(root, "data");
-    if (!cJSON_IsObject(data)) {
+    msg = cJSON_GetObjectItem(cJSON_GetArrayItem(choices, 0), "message");
+    content = cJSON_GetObjectItem(msg, "content");
+    if (!cJSON_IsString(content)) {
         cJSON_Delete(root);
         return FOCUS_ERR_PERCEP_NODATA;
     }
 
-    /* person */
-    cJSON *person = cJSON_GetObjectItem(data, "person");
-    if (cJSON_IsObject(person)) {
-        out->person_detected = cJSON_IsTrue(cJSON_GetObjectItem(person, "detected"));
+    /* content 可能是"解释+JSON"混排, 提取第一个 { 到最后一个 } 的 JSON 对象 */
+    s = content->valuestring;
+    start = strchr(s, '{');
+    end = strrchr(s, '}');
+    if (!start || !end || end <= start) {
+        cJSON_Delete(root);
+        return FOCUS_ERR_PERCEP_JSON;
+    }
+    len = (size_t)(end - start) + 1;
+    if (len >= sizeof(buf)) {
+        len = sizeof(buf) - 1;
+    }
+    memcpy(buf, start, len);
+    buf[len] = '\0';
 
-        cJSON *bbox = cJSON_GetObjectItem(person, "bbox");
-        if (cJSON_IsArray(bbox) && cJSON_GetArraySize(bbox) >= 4) {
-            for (int i = 0; i < 4; i++) {
-                cJSON *v = cJSON_GetArrayItem(bbox, i);
-                out->person_bbox[i] = cJSON_IsNumber(v) ? (float)v->valuedouble : 0.0f;
-            }
+    inner = cJSON_Parse(buf);
+    cJSON_Delete(root);
+    if (!inner) {
+        return FOCUS_ERR_PERCEP_JSON;
+    }
+
+    /* 填充 cloud_result_t (扁平字段, 见 MIMO_PROMPT) */
+    out->person_detected = cJSON_IsTrue(cJSON_GetObjectItem(inner, "person_present"));
+
+    cJSON *bbox = cJSON_GetObjectItem(inner, "person_bbox");
+    if (cJSON_IsArray(bbox) && cJSON_GetArraySize(bbox) >= 4) {
+        for (int i = 0; i < 4; i++) {
+            cJSON *v = cJSON_GetArrayItem(bbox, i);
+            out->person_bbox[i] = cJSON_IsNumber(v) ? (float)v->valuedouble : 0.0f;
         }
     }
 
-    /* phone */
-    cJSON *phone = cJSON_GetObjectItem(data, "phone");
-    if (cJSON_IsObject(phone)) {
-        out->phone_detected = cJSON_IsTrue(cJSON_GetObjectItem(phone, "detected"));
-        out->phone_in_hand  = cJSON_IsTrue(cJSON_GetObjectItem(phone, "near_hand"));
-    }
+    out->phone_detected = cJSON_IsTrue(cJSON_GetObjectItem(inner, "phone_detected"));
+    out->phone_in_hand  = cJSON_IsTrue(cJSON_GetObjectItem(inner, "phone_near_hand"));
 
-    /* head_pose */
-    cJSON *pose = cJSON_GetObjectItem(data, "head_pose");
-    if (cJSON_IsObject(pose)) {
-        cJSON *pitch = cJSON_GetObjectItem(pose, "pitch");
-        if (cJSON_IsNumber(pitch)) out->head_pitch = (float)pitch->valuedouble;
-        cJSON *yaw = cJSON_GetObjectItem(pose, "yaw");
-        if (cJSON_IsNumber(yaw)) out->head_yaw = (float)yaw->valuedouble;
-    }
+    cJSON *pitch = cJSON_GetObjectItem(inner, "head_pitch");
+    if (cJSON_IsNumber(pitch)) out->head_pitch = (float)pitch->valuedouble;
+    cJSON *yaw = cJSON_GetObjectItem(inner, "head_yaw");
+    if (cJSON_IsNumber(yaw)) out->head_yaw = (float)yaw->valuedouble;
 
-    cJSON *motion = cJSON_GetObjectItem(data, "hand_motion_score");
+    cJSON *motion = cJSON_GetObjectItem(inner, "hand_motion_score");
     if (cJSON_IsNumber(motion)) out->hand_motion = (float)motion->valuedouble;
 
-    cJSON *conf = cJSON_GetObjectItem(data, "confidence");
+    cJSON *conf = cJSON_GetObjectItem(inner, "confidence");
     if (cJSON_IsNumber(conf)) out->confidence = (float)conf->valuedouble;
 
-    cJSON_Delete(root);
+    cJSON_Delete(inner);
     return FOCUS_OK;
 }
 
@@ -434,6 +487,11 @@ int perception_init(const char *api_url, const char *api_key)
     } else {
         snprintf(g_api_key, sizeof(g_api_key), "%s", MIMO_API_KEY_DEFAULT);
     }
+
+#ifndef PERCEPTION_MOCK
+    /* 设置 HTTP 鉴权 (Authorization: Bearer), 供 MiMo API 使用 */
+    wifi_set_http_auth(g_api_key);
+#endif
 
     memset(g_history, 0, sizeof(g_history));
     g_history_count = 0;

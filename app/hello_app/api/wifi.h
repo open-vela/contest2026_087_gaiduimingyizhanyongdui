@@ -41,6 +41,11 @@ int  wifi_get_rssi(void);
 int  wifi_http_post(const char *url, const char *body,
                     char *resp, size_t maxlen);
 
+/* 设置 HTTP 请求的 API Key (Authorization: Bearer <key>)。
+ * 供云端鉴权接口 (如 MiMo) 使用; NULL 表示不带鉴权头。
+ * 追加于 2026-08-27, 不破坏既有接口。 */
+void wifi_set_http_auth(const char *api_key);
+
 #ifdef __cplusplus
 }
 #endif
