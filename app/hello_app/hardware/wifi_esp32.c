@@ -35,6 +35,27 @@
 #define WIFI_IFNAME    "wlan0"
 #define HTTP_TIMEOUT_SEC  3
 
+/* HTTP 请求鉴权 Key (Authorization: Bearer), wifi_set_http_auth 设置 */
+static char g_http_api_key[80];
+
+/****************************************************************************
+ * Name: wifi_set_http_auth
+ *
+ * 设置 HTTP 请求的 API Key (Authorization: Bearer <key>)。
+ * 供云端鉴权接口 (如 MiMo) 使用; NULL 清除。
+ ****************************************************************************/
+void wifi_set_http_auth(const char *api_key)
+{
+  if (api_key != NULL)
+    {
+      strlcpy(g_http_api_key, api_key, sizeof(g_http_api_key));
+    }
+  else
+    {
+      g_http_api_key[0] = '\0';
+    }
+}
+
 /****************************************************************************
  * Name: wifi_connect
  *
@@ -271,19 +292,29 @@ int wifi_http_post(const char *url, const char *body,
           return FOCUS_ERR_NET_DISCONN;
         }
 
-      req_len = snprintf(req, sizeof(req),
-                         "POST %s HTTP/1.1\r\n"
-                         "Host: %s\r\n"
-                         "Content-Type: application/json\r\n"
-                         "Content-Length: %d\r\n"
-                         "Connection: close\r\n\r\n"
-                         "%s",
-                         path, host, (int)strlen(body), body);
-      if (req_len < 0 || (size_t)req_len >= sizeof(req))
-        {
-          close(sock);
-          return FOCUS_ERR_PARAM;
-        }
+      {
+        char auth_hdr[160] = "";
+        if (g_http_api_key[0] != '\0')
+          {
+            snprintf(auth_hdr, sizeof(auth_hdr),
+                     "Authorization: Bearer %s\r\n", g_http_api_key);
+          }
+
+        req_len = snprintf(req, sizeof(req),
+                           "POST %s HTTP/1.1\r\n"
+                           "Host: %s\r\n"
+                           "Content-Type: application/json\r\n"
+                           "%s"
+                           "Content-Length: %d\r\n"
+                           "Connection: close\r\n\r\n"
+                           "%s",
+                           path, host, auth_hdr, (int)strlen(body), body);
+        if (req_len < 0 || (size_t)req_len >= sizeof(req))
+          {
+            close(sock);
+            return FOCUS_ERR_PARAM;
+          }
+      }
 
       if (send(sock, req, req_len, 0) < 0)
         {
