@@ -6,7 +6,9 @@ include $(APPDIR)/Make.defs
 
 PROGNAME  = hello_app
 PRIORITY  = SCHED_PRIORITY_DEFAULT
-STACKSIZE = 8192
+# TinyJPEG tje_encode_with_func 单函数栈帧 8KB, 加上 rgb565_to_jpeg / printf /
+# 主循环上下文, 必须 ≥32KB。此前 8KB(builtin 表陈旧)导致栈溢出踩坏 TLS。
+STACKSIZE = 32768
 MODULE    = $(CONFIG_LVX_USE_DEMO_CONTEST2026_087_HELLO_APP)
 
 MAINSRC = hello_app_main.c

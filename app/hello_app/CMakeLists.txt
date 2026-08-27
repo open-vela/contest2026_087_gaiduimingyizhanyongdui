@@ -41,5 +41,5 @@ if(CONFIG_LVX_USE_DEMO_CONTEST2026_087_HELLO_APP)
   nuttx_add_application(
     NAME hello_app
     SRCS ${FOCUS_AIOT_SRCS}
-    STACKSIZE 8192)
+    STACKSIZE 32768)
 endif()
