@@ -267,8 +267,15 @@ int main(int argc, char *argv[])
         {
             state_machine_tick();   /* 内部 behavior_analyze 消费感知历史 */
 
+            /* 摄像头只在监测状态工作；模式选择/报告页面不能被采集或
+             * 阻塞式云端识图拖慢。离开监测后清零计数，下一次进入监测
+             * 从完整的 5 秒周期开始。 */
+            if (state_machine_get_status() != DEVICE_MONITORING)
+            {
+                frame_tick = 0;
+            }
             /* 每 50 tick (5s) 采一帧喂感知, 更新 history 供行为引擎 */
-            if (++frame_tick >= 50)
+            else if (++frame_tick >= 50)
             {
                 frame_tick = 0;
 #ifdef PERCEPTION_MOCK
@@ -291,10 +298,14 @@ int main(int argc, char *argv[])
                     /* 每次采集都在串口打点, 便于真机核对采集/识图节奏 */
                     printf("[cam] #%u 尝试采集...\n", ++cap_seq);
                     cret = camera_capture_frame(frame, &fsize);
-                    if (cret == FOCUS_OK && fsize > 0)
+                    if (cret == FOCUS_OK &&
+                        fsize >= (size_t)(320 * 240 * 2))
                     {
-                        printf("[cam] #%u 采集OK %uB -> 转JPEG...\n",
+                        printf("[cam] #%u 采集OK %uB -> 预览 -> 转JPEG...\n",
                                cap_seq, (unsigned)fsize);
+                        /* 预览必须先于 JPEG/识图，确保用户能在云端请求
+                         * 阻塞期间看到最新的摄像头画面。 */
+                        (void)lcd_show_preview(frame, 320, 240);
                         if (rgb565_to_jpeg(frame, 320, 240,
                                            jpeg_buf, &jpeg_size) == 0)
                         {
@@ -317,8 +328,8 @@ int main(int argc, char *argv[])
                     }
                     else
                     {
-                        printf("[cam] #%u 采集失败 ret=%d errno=%d\n",
-                               cap_seq, cret, errno);
+                        printf("[cam] #%u 采集失败/数据不完整 ret=%d size=%u errno=%d\n",
+                               cap_seq, cret, (unsigned)fsize, errno);
                     }
                 }
 #endif

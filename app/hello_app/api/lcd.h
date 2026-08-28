@@ -49,6 +49,11 @@ uint16_t *lcd_get_framebuffer(void);
 int  lcd_show_status(device_status_t st, session_stats_t *s,
                      study_state_t *ss);
 
+/* 显示一帧摄像头预览。
+ * rgb565 指向 src_w x src_h、每像素 16 bit 的 RGB565 图像，调用方负责
+ * 保证缓冲区在本次调用期间有效。预览只在 DEVICE_MONITORING 页面显示。 */
+int  lcd_show_preview(const uint8_t *rgb565, int src_w, int src_h);
+
 /* 显示学习报告 (学习结束调用一次)。
  * r:      报告数据
  * advice: MiMo 建议文本 (可为 NULL，表示未获取到)
