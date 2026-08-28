@@ -23,6 +23,11 @@
 #  define UI_ANIMATION_STEP_MS 100U
 #endif
 
+#define PREVIEW_X       120
+#define PREVIEW_Y        36
+#define PREVIEW_WIDTH   112
+#define PREVIEW_HEIGHT   84
+
 enum ui_screen_e
 {
   UI_SCREEN_STATUS,
@@ -47,6 +52,7 @@ struct ui_context_s
   char message[128];
   uint64_t message_started_ms;
   unsigned int message_generation;
+  int preview_valid;
 };
 
 static struct ui_context_s g_ui =
@@ -65,6 +71,10 @@ static const uint16_t COLOR_MUTED = UI_RGB565(145, 160, 181);
 static const uint16_t COLOR_GREEN = UI_RGB565(0, 200, 83);
 static const uint16_t COLOR_ORANGE = UI_RGB565(255, 152, 0);
 static const uint16_t COLOR_RED = UI_RGB565(213, 0, 0);
+
+/* 112 x 84 RGB565 = 18,816 bytes. 这是预览的持久副本，避免主循环复用
+ * 摄像头 frame 缓冲后，UI 异步刷新时读取到下一帧或已失效的数据。 */
+static uint16_t g_preview_pixels[PREVIEW_WIDTH * PREVIEW_HEIGHT];
 
 static uint64_t monotonic_ms(void)
 {
@@ -140,6 +150,35 @@ static void draw_header(ui_surface_t *surface, const char *left,
     }
 }
 
+static void draw_preview(ui_surface_t *surface)
+{
+  int row;
+
+  /* 预览和状态图标并排，底部统计区从 y=143 开始，不会互相遮挡。 */
+  if (g_ui.preview_valid)
+    {
+      for (row = 0; row < PREVIEW_HEIGHT; row++)
+        {
+          memcpy(surface->pixels + (PREVIEW_Y + row) * surface->stride +
+                 PREVIEW_X,
+                 g_preview_pixels + row * PREVIEW_WIDTH,
+                 PREVIEW_WIDTH * sizeof(uint16_t));
+        }
+    }
+  else
+    {
+      ui_fill_rect(surface, PREVIEW_X, PREVIEW_Y, PREVIEW_WIDTH,
+                   PREVIEW_HEIGHT, COLOR_PANEL);
+      ui_text_center(surface, PREVIEW_X + PREVIEW_WIDTH / 2,
+                     PREVIEW_Y + PREVIEW_HEIGHT / 2 - 5,
+                     "等待画面", 1, COLOR_MUTED);
+    }
+  ui_rect(surface, PREVIEW_X, PREVIEW_Y, PREVIEW_WIDTH, PREVIEW_HEIGHT,
+          1, COLOR_MUTED);
+  ui_text_center(surface, PREVIEW_X + PREVIEW_WIDTH / 2,
+                 PREVIEW_Y + PREVIEW_HEIGHT + 3, "实时画面", 1, COLOR_MUTED);
+}
+
 static void render_idle(ui_surface_t *surface)
 {
   ui_clear(surface, COLOR_BACKGROUND);
@@ -201,9 +240,10 @@ static void render_monitoring(ui_surface_t *surface,
   format_duration(effective, sizeof(effective), stats->effective_duration_sec);
   ui_clear(surface, COLOR_BACKGROUND);
   draw_header(surface, mode_name(mode), total, accent);
-  lcd_draw_status_icon(surface, 80, 38, mode, study->status);
-  ui_text_center(surface, LCD_WIDTH / 2, 123, status_name(study->status), 1,
+  lcd_draw_status_icon(surface, 8, 38, mode, study->status);
+  ui_text_center(surface, 48, 123, status_name(study->status), 1,
                  accent);
+  draw_preview(surface);
 
   snprintf(line, sizeof(line), "有效  %s", effective);
   ui_text(surface, 12, 143, line, 1, COLOR_TEXT);
@@ -405,6 +445,7 @@ static void ui_initialize_once(void)
   g_ui.surface.stride = LCD_WIDTH;
   g_ui.screen = UI_SCREEN_STATUS;
   g_ui.device_status = DEVICE_IDLE;
+  g_ui.preview_valid = 0;
   g_ui.initialized = 1;
   render_idle(&g_ui.surface);
   present_locked();
@@ -449,6 +490,10 @@ int lcd_show_status(device_status_t status, session_stats_t *stats,
   g_ui.study = *study;
   if (status != DEVICE_MONITORING)
     {
+      g_ui.preview_valid = 0;
+    }
+  if (status != DEVICE_MONITORING)
+    {
       g_ui.message_active = 0;
       g_ui.message_generation++;
     }
@@ -459,6 +504,56 @@ int lcd_show_status(device_status_t status, session_stats_t *stats,
     }
   pthread_mutex_unlock(&g_ui.lock);
   return 0;
+}
+
+int lcd_show_preview(const uint8_t *rgb565, int src_w, int src_h)
+{
+  int x;
+  int y;
+  int ret = ui_initialize();
+
+  if (ret < 0) return ret;
+  if (rgb565 == NULL || src_w <= 0 || src_h <= 0)
+    return FOCUS_ERR_PARAM;
+  /* Prevent integer overflow in the source pixel offset below while still
+   * allowing all practical camera resolutions. */
+  if (src_w > 4096 || src_h > 4096)
+    return FOCUS_ERR_PARAM;
+
+  pthread_mutex_lock(&g_ui.lock);
+  if (g_ui.device_status != DEVICE_MONITORING)
+    {
+      pthread_mutex_unlock(&g_ui.lock);
+      return FOCUS_ERR_BUSY;
+    }
+
+  /* Nearest-neighbour sampling keeps the 4:3 camera image undistorted in
+   * the 112x84 (also 4:3) preview rectangle. memcpy avoids alignment and
+   * strict-aliasing assumptions about the caller's byte buffer. */
+  for (y = 0; y < PREVIEW_HEIGHT; y++)
+    {
+      int src_y = src_h == 1 ? 0 :
+                  (int)((long long)y * (src_h - 1) /
+                        (PREVIEW_HEIGHT - 1));
+      for (x = 0; x < PREVIEW_WIDTH; x++)
+        {
+          int src_x = src_w == 1 ? 0 :
+                      (int)((long long)x * (src_w - 1) /
+                            (PREVIEW_WIDTH - 1));
+          size_t offset = ((size_t)src_y * (size_t)src_w +
+                           (size_t)src_x) * sizeof(uint16_t);
+          memcpy(&g_preview_pixels[y * PREVIEW_WIDTH + x],
+                 rgb565 + offset, sizeof(uint16_t));
+        }
+    }
+  g_ui.preview_valid = 1;
+  if (!g_ui.message_active)
+    {
+      render_status_locked();
+      present_locked();
+    }
+  pthread_mutex_unlock(&g_ui.lock);
+  return FOCUS_OK;
 }
 
 int lcd_show_report(session_report_t *report, const char *advice)
