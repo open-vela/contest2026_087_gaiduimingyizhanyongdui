@@ -39,7 +39,11 @@
 #include <time.h>
 
 #include "../api/perception.h"
+#include "../api/error.h"
 #include "perception_internal.h"
+
+/* 参数错误: error.h 统一用 FOCUS_ERR_PARAM (-2) */
+#define FOCUS_ERR_PERCEP_PARAM   FOCUS_ERR_PARAM
 
 #ifndef PERCEPTION_MOCK
 #include <netutils/cJSON.h>
@@ -339,6 +343,7 @@ static int parse_observation_json(const char *json, cloud_result_t *out)
     if (cJSON_IsNumber(conf)) out->confidence = (float)conf->valuedouble;
 
     cJSON_Delete(root);
+    return FOCUS_OK;
     return FOCUS_OK;
 }
 
