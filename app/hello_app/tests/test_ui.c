@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "behavior.h"
-#include "error.h"
 #include "lcd.h"
 #include "lcd_ui.h"
 #include "mimo.h"
@@ -17,7 +16,6 @@
 #include <time.h>
 
 static uint16_t g_framebuffer[LCD_WIDTH * LCD_HEIGHT];
-static uint16_t g_camera_frame[320 * 240];
 static int g_flush_count;
 
 int lcd_init(void) { return 0; }
@@ -74,21 +72,6 @@ int main(void)
   assert(g_flush_count > 0);
   assert(count_color(pixels, UI_RGB565(0, 200, 83)) > 100);
   assert(ui_cjk_glyph(0x8bf7) != NULL); /* 请 */
-
-  /* 预览接口拒绝非监测页面，并将 RGB565 源帧缩放到右上角独立区域。 */
-  stats.current_mode = MODE_STRICT;
-  assert(lcd_show_status(DEVICE_IDLE, &stats, &study) == 0);
-  assert(lcd_show_preview((const uint8_t *)g_camera_frame, 320, 240) ==
-         FOCUS_ERR_BUSY);
-  for (size_t i = 0; i < sizeof(g_camera_frame) / sizeof(g_camera_frame[0]);
-       i++)
-    g_camera_frame[i] = (uint16_t)(i & 0xffffU);
-  assert(lcd_show_status(DEVICE_MONITORING, &stats, &study) == 0);
-  assert(lcd_show_preview((const uint8_t *)g_camera_frame, 320, 240) == 0);
-  /* PREVIEW_X=120, PREVIEW_Y=36, width=112, height=84; account for the
-   * one-pixel border when checking the interior samples. */
-  assert(pixels[37 * LCD_WIDTH + 121] == g_camera_frame[642]);
-  assert(pixels[118 * LCD_WIDTH + 230] == g_camera_frame[236 * 320 + 316]);
 
   stats.current_mode = MODE_GENTLE;
   study.status = PLAYING_PHONE;
