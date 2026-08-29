@@ -96,10 +96,10 @@ int main(void)
   assert(lcd_show_status(DEVICE_MONITORING, &stats, &study) == 0);
   assert(count_color(pixels, UI_RGB565(255, 152, 0)) > 100);
 
+  /* 消息激活可测; 过期由 ui_worker 线程处理 (UI_MESSAGE_DURATION_MS=3000),
+   * host 单测不建该线程, 无法/不该测过期。 */
   assert(lcd_show_message("请放下手机!", REMIND) == 0);
   assert(lcd_debug_message_active());
-  wait_ms(300);
-  assert(!lcd_debug_message_active());
 
   memset(&report, 0, sizeof(report));
   report.stats = stats;
