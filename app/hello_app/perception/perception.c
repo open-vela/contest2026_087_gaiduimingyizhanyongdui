@@ -6,23 +6,28 @@
  *         不做时间维度的行为推理 (那是赵思涵 behavior 模块的事)。
  *
  * 输入:   JPEG 图像 (来自张沐泽 camera_frame_buffer / camera_capture_frame)
- * 输出:   observation_t (每帧一个, 经 MiMo 识图接口 + 3 帧去抖)
+ * 输出:   observation_t (每帧一个, 经云端 VLM 识图接口 + 3 帧去抖)
  *
- * MiMo 调用时机: 每帧都调 (perception_process 每次收到一帧 JPEG 都调一次
- *                mimo_detect(), 失败重试 1 次, 总阻塞 ≤6s)
+ * 云端 VLM 调用时机: 每帧都调 (perception_process 每次收到一帧 JPEG 都调一次
+ *                    cloud_detect(), 失败重试 1 次, 总阻塞 ≤6s)
  *
- * MiMo 契约 (已冻结):
- *   Request:  {"image":"<base64>","width":320,"height":240}
- *   Response: {"code":0,"data":{person/phone/head_pose/hand_motion_score/confidence}}
+ * 云端 VLM 契约 (OpenAI 兼容 /v1/chat/completions, 模型默认 Qwen2.5-VL-3B):
+ *   Request:  {"model":"Qwen/Qwen2.5-VL-3B-Instruct",
+ *              "messages":[{"role":"user","content":[
+ *                {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,<b64>"}},
+ *                {"type":"text","text":"<PROMPT>"}]}],
+ *              "temperature":0,"max_tokens":512}
+ *   Response: {"choices":[{"message":{"content":"<observation JSON>"}}]}
+ *             content 里的 JSON 字段: person/phone/head_pose/hand_motion_score/confidence
  *
  * 三个对外接口 (冻结于 api/perception.h):
- *   perception_init()         初始化 MiMo endpoint/key + 清空历史
- *   perception_process()      一帧 JPEG → (调 MiMo) → observation_t
+ *   perception_init()         初始化 VLM endpoint/key + 清空历史
+ *   perception_process()      一帧 JPEG → (调云端 VLM) → observation_t
  *   perception_get_history()  取最近 N 条 observation (供 behavior 时序分析)
  *
  * 编译开关:
- *   -D PERCEPTION_MOCK  走 mock 路径 (不调 MiMo), 默认 mock 便于联调/回退
- *                       不定义则走真实 MiMo 链路 (需要 cJSON + wifi_http_post)
+ *   -D PERCEPTION_MOCK  走 mock 路径 (不调云端 VLM), 默认 mock 便于联调/回退
+ *                       不定义则走真实云端 VLM 链路 (需要 cJSON + wifi_http_post)
  ****************************************************************************/
 
 #include <stdbool.h>
@@ -36,19 +41,10 @@
 #include "../api/perception.h"
 #include "perception_internal.h"
 
-/* ======================================================================
- * 错误码统一使用 api/error.h (FOCUS_ERR_PERCEP_* = -30/-31/-32)
- * ====================================================================== */
-#include "../api/error.h"
-
-/* 参数错误: error.h 统一用 FOCUS_ERR_PARAM (-2) */
-#define FOCUS_ERR_PERCEP_PARAM   FOCUS_ERR_PARAM
-
 #ifndef PERCEPTION_MOCK
 #include <netutils/cJSON.h>
 /* 张沐泽提供, 见 api/wifi.h (前向声明, 避免独立编译依赖) */
 int wifi_http_post(const char *url, const char *body, char *resp, size_t maxlen);
-void wifi_set_http_auth(const char *api_key);
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -58,32 +54,34 @@ void wifi_set_http_auth(const char *api_key);
 #define FRAME_WIDTH     320
 #define FRAME_HEIGHT    240
 #define MAX_JPEG_SIZE   (50 * 1024)     /* 320x240 JPEG 上限 */
-/* MiMo 响应缓冲: mimo-v2.5 推理 (reasoning_content) 很长, 响应可达
- * 6-8KB, 4096 会截断末尾 JSON 导致解析失败, 需 ≥16KB */
-#define RESP_BUF_SIZE   16384           /* MiMo 响应缓冲 */
+#define RESP_BUF_SIZE   8192            /* 云端 VLM 响应缓冲 (含 envelope 冗余) */
 
-/* MiMo 识图 endpoint 与鉴权 key。
- * 优先级: perception_init() 传入 > 下面的默认值。
- *
- * 设备无 TLS 栈, 无法直连 https 的 MiMo。经中继 (tools/mimo_relay.py,
- * 部署在租用服务器 106.15.192.201:8060) 转发:
- *   设备 --http--> 中继 --https--> MiMo
- * endpoint 填中继地址; key 填中继访问令牌 RELAY_TOKEN
- * (wifi_set_http_auth 设成 Authorization: Bearer <token>)。 */
-#define MIMO_ENDPOINT_DEFAULT   "http://106.15.192.201:8060/v1/chat/completions"
-#define MIMO_API_KEY_DEFAULT    "focus087relay"
-#define MIMO_MODEL              "mimo-v2.5"
+/* 云端 VLM endpoint、鉴权 key 与模型名。
+ * 优先级: perception_init() 传入 > 下面的默认值 (endpoint/key)。
+ * 模型名是编译期宏 (签名冻结, 运行时不变); 若服务端用 --served-model-name
+ * 改了别名, 把 VLM_MODEL_DEFAULT 改成那个别名即可。
+ * TODO: 把 endpoint 填成自托管 /v1/chat/completions 真实地址; 鉴权按实际情况填。
+ *       wifi_http_post(url, body, resp, maxlen) 带不了 header, 自托管 vLLM 默认
+ *       无鉴权跑局域网即可; 若网关要求 Authorization, key 走 URL query 传入,
+ *       g_api_key 暂作预留 (需与张沐泽确认)。 */
+#define VLM_MODEL_DEFAULT      "Qwen/Qwen2.5-VL-3B-Instruct"
+#define VLM_ENDPOINT_DEFAULT   ""
+#define VLM_API_KEY_DEFAULT    ""
 
-/* 提示 MiMo 输出结构化 JSON (学习专注场景分析)。
- * ⚠️ 该字符串经 snprintf 直接嵌入请求 JSON (未做 JSON 转义), 因此
- *    绝不能含 " { } 等 JSON 结构字符 —— 否则整个请求变非法 JSON,
- *    云端返回 400 Invalid JSON (曾因字面 JSON 示例踩坑)。用文字描述字段。 */
-#define MIMO_PROMPT \
-  "你是学习专注监测AI。分析图片中学习者的状态，只输出一个JSON对象，不要输出其他任何文本。" \
-  "JSON字段: person_present(bool,是否有人), person_bbox(数组x,y,w,h,归一化), " \
-  "phone_detected(bool,是否检测到手机), phone_near_hand(bool,手机是否在手部附近), " \
-  "head_pitch(float,头部俯仰角,负=低头), head_yaw(float,头部偏转角), " \
-  "hand_motion_score(float,0到1,手部运动量), confidence(float,0到1,置信度)。"
+/* 发给 VLM 的固定指令: 只输出一个 JSON 对象, 不带说明/围栏。
+ * 注意保持单行、不含双引号/反斜杠/换行 (会被原样嵌入 JSON text 字段)。 */
+#define VLM_PROMPT \
+    "You are a vision detector for a study-space camera. " \
+    "Look at the image and return exactly one JSON object, nothing else " \
+    "(no markdown, no explanation). Required keys: " \
+    "person.detected (true/false), " \
+    "person.bbox (array of 4 numbers x,y,w,h normalized 0 to 1, all zero if no person), " \
+    "phone.detected (true/false), " \
+    "phone.near_hand (true/false), " \
+    "head_pose.pitch (degrees, negative means looking down), " \
+    "head_pose.yaw (degrees), " \
+    "hand_motion_score (0 to 1), " \
+    "confidence (0 to 1)."
 
 /* ------------------------------------------------------------------ */
 /* 模块状态 (单例; 该模块由 wifi_task 串行调用, 无重入)                */
@@ -101,7 +99,7 @@ static int            g_debounce_idx   = 0;
 static int            g_mock_seq = 0;       /* mock 轮转序号 */
 
 #ifndef PERCEPTION_MOCK
-static char           g_resp[RESP_BUF_SIZE]; /* MiMo 响应缓冲 (仅真实链路) */
+static char           g_resp[RESP_BUF_SIZE]; /* 云端 VLM 响应缓冲 (仅真实链路) */
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -267,12 +265,132 @@ void perception_debounce_compute(observation_t *out, uint32_t ts)
 }
 
 /* ------------------------------------------------------------------ */
-/* MiMo 识图 (每帧都调, 仅真实链路)                                     */
+/* 云端 VLM 识图 (每帧都调, 仅真实链路)                                 */
 /* ------------------------------------------------------------------ */
 
 #ifndef PERCEPTION_MOCK
 
-static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
+/* 从 VLM 输出文本里定位并裁剪出最外层 JSON 对象。
+ * content 常被 VLM 套 ```json 围栏或前后加说明文字, cJSON_Parse 要求
+ * 结尾只允许空白, 所以这里按大括号深度找到匹配的 '}' 并把其后截断。
+ * 注: 我们只输出布尔/数字/数组, JSON 里不会出现带 '{'/'}' 的字符串, 故
+ *     不处理字符串内嵌括号的边界情况。返回首个 '{' 指针, 失败返回 NULL。 */
+static char *extract_json_object(char *s)
+{
+    char *start = NULL;
+    int depth = 0;
+
+    for (char *p = s; *p; p++) {
+        if (*p == '{') {
+            if (depth == 0) start = p;
+            depth++;
+        } else if (*p == '}') {
+            if (depth > 0 && --depth == 0) {
+                p[1] = '\0';   /* 截断围栏/说明文字 */
+                return start;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* 解析模型输出的 observation JSON (无 code/data 包裹, 字段直接平铺) */
+static int parse_observation_json(const char *json, cloud_result_t *out)
+{
+    cJSON *root = cJSON_Parse(json);
+    if (!root) {
+        return FOCUS_ERR_PERCEP_JSON;
+    }
+
+    /* person */
+    cJSON *person = cJSON_GetObjectItem(root, "person");
+    if (cJSON_IsObject(person)) {
+        out->person_detected = cJSON_IsTrue(cJSON_GetObjectItem(person, "detected"));
+
+        cJSON *bbox = cJSON_GetObjectItem(person, "bbox");
+        if (cJSON_IsArray(bbox) && cJSON_GetArraySize(bbox) >= 4) {
+            for (int i = 0; i < 4; i++) {
+                cJSON *v = cJSON_GetArrayItem(bbox, i);
+                out->person_bbox[i] = cJSON_IsNumber(v) ? (float)v->valuedouble : 0.0f;
+            }
+        }
+    }
+
+    /* phone */
+    cJSON *phone = cJSON_GetObjectItem(root, "phone");
+    if (cJSON_IsObject(phone)) {
+        out->phone_detected = cJSON_IsTrue(cJSON_GetObjectItem(phone, "detected"));
+        out->phone_in_hand  = cJSON_IsTrue(cJSON_GetObjectItem(phone, "near_hand"));
+    }
+
+    /* head_pose */
+    cJSON *pose = cJSON_GetObjectItem(root, "head_pose");
+    if (cJSON_IsObject(pose)) {
+        cJSON *pitch = cJSON_GetObjectItem(pose, "pitch");
+        if (cJSON_IsNumber(pitch)) out->head_pitch = (float)pitch->valuedouble;
+        cJSON *yaw = cJSON_GetObjectItem(pose, "yaw");
+        if (cJSON_IsNumber(yaw)) out->head_yaw = (float)yaw->valuedouble;
+    }
+
+    cJSON *motion = cJSON_GetObjectItem(root, "hand_motion_score");
+    if (cJSON_IsNumber(motion)) out->hand_motion = (float)motion->valuedouble;
+
+    cJSON *conf = cJSON_GetObjectItem(root, "confidence");
+    if (cJSON_IsNumber(conf)) out->confidence = (float)conf->valuedouble;
+
+    cJSON_Delete(root);
+    return FOCUS_OK;
+}
+
+/* 解析 OpenAI 兼容 chat completions 响应 → cloud_result_t */
+int perception_parse_cloud_response(const char *resp, cloud_result_t *out)
+{
+    if (!resp || !out) {
+        return FOCUS_ERR_PERCEP_JSON;
+    }
+
+    /* wifi_http_post 返回完整 HTTP 响应 (状态行+头+body),
+     * 先跳过 "\r\n\r\n" 之后的 body 再解析, 否则 cJSON 解析失败 */
+    {
+        const char *hdr_end = strstr(resp, "\r\n\r\n");
+        if (hdr_end != NULL) {
+            resp = hdr_end + 4;
+        }
+    }
+
+    cJSON *root = cJSON_Parse(resp);
+    if (!root) {
+        return FOCUS_ERR_PERCEP_JSON;
+    }
+
+    cJSON *choices = cJSON_GetObjectItem(root, "choices");
+    if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) < 1) {
+        cJSON_Delete(root);
+        return FOCUS_ERR_PERCEP_NODATA;   /* 无 choices: 无数据/服务端错误 */
+    }
+
+    cJSON *message = cJSON_GetObjectItem(cJSON_GetArrayItem(choices, 0), "message");
+    cJSON *content = cJSON_IsObject(message)
+                         ? cJSON_GetObjectItem(message, "content") : NULL;
+    if (!cJSON_IsString(content)) {
+        cJSON_Delete(root);
+        return FOCUS_ERR_PERCEP_NODATA;
+    }
+
+    /* content 是 VLM 生成的文本, 提取其中嵌套的 observation JSON 再解析 */
+    char *json = extract_json_object(content->valuestring);
+    if (!json) {
+        cJSON_Delete(root);
+        return FOCUS_ERR_PERCEP_JSON;
+    }
+
+    int ret = parse_observation_json(json, out);
+    cJSON_Delete(root);
+    return ret;
+}
+
+/* 每帧调用云端 VLM 识图 */
+static int cloud_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
 {
     /* 1. Base64 编码 (b64 ≈ 4/3 原图大小, 用堆/PSRAM 避免挤爆小栈) */
     size_t b64_cap = perception_base64_encoded_len(jpeg_len) + 1;
@@ -286,150 +404,40 @@ static int mimo_detect(uint8_t *jpeg, size_t jpeg_len, cloud_result_t *raw)
         return FOCUS_ERR_PERCEP_PARAM;
     }
 
-    /* 2. 构造 OpenAI chat/completions 请求体:
-     *    model + messages(system + user[image_url base64, text prompt]) */
-    size_t img_len = strlen("data:image/jpeg;base64,") + b64_len;
-    char *img = malloc(img_len + 1);
-    if (!img) {
+    /* 2. 构造 OpenAI 兼容请求体 (+1024 容纳 prompt/data URI/model/围栏) */
+    size_t req_cap = b64_len + 1024;
+    char *req = malloc(req_cap);
+    if (!req) {
         free(b64);
         return FOCUS_ERR_PERCEP_PARAM;
     }
-    snprintf(img, img_len + 1, "data:image/jpeg;base64,%s", b64);
+    int n = snprintf(req, req_cap,
+        "{\"model\":\"%s\","
+        "\"messages\":[{\"role\":\"user\",\"content\":["
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,%s\"}},"
+        "{\"type\":\"text\",\"text\":\"%s\"}"
+        "]}]"
+        ",\"temperature\":0,\"max_tokens\":512}",
+        VLM_MODEL_DEFAULT, b64, VLM_PROMPT);
     free(b64);
-
-    size_t req_cap = img_len + sizeof(MIMO_PROMPT) + 256;
-    char *req = malloc(req_cap);
-    if (!req) {
-        free(img);
+    if (n < 0 || (size_t)n >= req_cap) {
+        free(req);
         return FOCUS_ERR_PERCEP_PARAM;
     }
-    snprintf(req, req_cap,
-             "{\"model\":\"%s\",\"max_completion_tokens\":2048,"
-             "\"messages\":["
-             "{\"role\":\"system\",\"content\":\"You are MiMo, an AI assistant "
-             "developed by Xiaomi.\"},"
-             "{\"role\":\"user\",\"content\":["
-             "{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}},"
-             "{\"type\":\"text\",\"text\":\"%s\"}]}]}",
-             MIMO_MODEL, img, MIMO_PROMPT);
-    free(img);
 
     /* 3. HTTP POST: 单次超时由 wifi_http_post 保证 ≤3s;
      *    失败重试 1 次, 总阻塞 ≤6s (满足开发规范约束) */
     int ret = wifi_http_post(g_api_url, req, g_resp, sizeof(g_resp));
     if (ret < 0) {
-        printf("[percep] MiMo HTTP 首发失败 ret=%d, 重试...\n", ret);
         ret = wifi_http_post(g_api_url, req, g_resp, sizeof(g_resp));
     }
     free(req);
     if (ret < 0) {
-        printf("[percep] MiMo HTTP 失败 ret=%d\n", ret);
         return FOCUS_ERR_PERCEP_TIMEOUT;
     }
 
-    /* HTTP 成功: 打印响应头一截, 便于区分"网络失败"与"解析失败" */
-    printf("[percep] MiMo HTTP OK, resp=%.120s\n", g_resp);
-
     /* 4. 解析响应 → 云端原始结果 */
     return perception_parse_cloud_response(g_resp, raw);
-}
-
-/* MiMo 响应解析 (OpenAI chat/completions 格式):
- *   外层 {choices:[{message:{content:"<JSON文本>"}}]},
- *   content 为模型输出的 JSON 字符串 → cloud_result_t。 */
-int perception_parse_cloud_response(const char *resp, cloud_result_t *out)
-{
-    const char *s;
-    const char *start;
-    const char *end;
-    char buf[512];
-    size_t len;
-    cJSON *inner;
-    cJSON *root;
-    cJSON *choices;
-    cJSON *msg;
-    cJSON *content;
-
-    if (!resp || !out) {
-        return FOCUS_ERR_PERCEP_JSON;
-    }
-
-    /* wifi_http_post 返回的是完整 HTTP 响应 (含状态行+头+body),
-     * cJSON 只认 body。跳过 "\r\n\r\n" 之后的部分再解析。 */
-    s = resp;
-    {
-        const char *hdr_end = strstr(s, "\r\n\r\n");
-        if (hdr_end != NULL) {
-            s = hdr_end + 4;
-        }
-    }
-
-    root = cJSON_Parse(s);
-    if (!root) {
-        return FOCUS_ERR_PERCEP_JSON;
-    }
-
-    /* 取 choices[0].message.content */
-    choices = cJSON_GetObjectItem(root, "choices");
-    if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
-        cJSON_Delete(root);
-        return FOCUS_ERR_PERCEP_NODATA;
-    }
-    msg = cJSON_GetObjectItem(cJSON_GetArrayItem(choices, 0), "message");
-    content = cJSON_GetObjectItem(msg, "content");
-    if (!cJSON_IsString(content)) {
-        cJSON_Delete(root);
-        return FOCUS_ERR_PERCEP_NODATA;
-    }
-
-    /* content 可能是"解释+JSON"混排, 提取第一个 { 到最后一个 } 的 JSON 对象 */
-    s = content->valuestring;
-    start = strchr(s, '{');
-    end = strrchr(s, '}');
-    if (!start || !end || end <= start) {
-        cJSON_Delete(root);
-        return FOCUS_ERR_PERCEP_JSON;
-    }
-    len = (size_t)(end - start) + 1;
-    if (len >= sizeof(buf)) {
-        len = sizeof(buf) - 1;
-    }
-    memcpy(buf, start, len);
-    buf[len] = '\0';
-
-    inner = cJSON_Parse(buf);
-    cJSON_Delete(root);
-    if (!inner) {
-        return FOCUS_ERR_PERCEP_JSON;
-    }
-
-    /* 填充 cloud_result_t (扁平字段, 见 MIMO_PROMPT) */
-    out->person_detected = cJSON_IsTrue(cJSON_GetObjectItem(inner, "person_present"));
-
-    cJSON *bbox = cJSON_GetObjectItem(inner, "person_bbox");
-    if (cJSON_IsArray(bbox) && cJSON_GetArraySize(bbox) >= 4) {
-        for (int i = 0; i < 4; i++) {
-            cJSON *v = cJSON_GetArrayItem(bbox, i);
-            out->person_bbox[i] = cJSON_IsNumber(v) ? (float)v->valuedouble : 0.0f;
-        }
-    }
-
-    out->phone_detected = cJSON_IsTrue(cJSON_GetObjectItem(inner, "phone_detected"));
-    out->phone_in_hand  = cJSON_IsTrue(cJSON_GetObjectItem(inner, "phone_near_hand"));
-
-    cJSON *pitch = cJSON_GetObjectItem(inner, "head_pitch");
-    if (cJSON_IsNumber(pitch)) out->head_pitch = (float)pitch->valuedouble;
-    cJSON *yaw = cJSON_GetObjectItem(inner, "head_yaw");
-    if (cJSON_IsNumber(yaw)) out->head_yaw = (float)yaw->valuedouble;
-
-    cJSON *motion = cJSON_GetObjectItem(inner, "hand_motion_score");
-    if (cJSON_IsNumber(motion)) out->hand_motion = (float)motion->valuedouble;
-
-    cJSON *conf = cJSON_GetObjectItem(inner, "confidence");
-    if (cJSON_IsNumber(conf)) out->confidence = (float)conf->valuedouble;
-
-    cJSON_Delete(inner);
-    return FOCUS_OK;
 }
 
 #endif /* !PERCEPTION_MOCK */
@@ -437,7 +445,7 @@ int perception_parse_cloud_response(const char *resp, cloud_result_t *out)
 /* ------------------------------------------------------------------ */
 /* Mock 路径 (阶段 1, 联调用)                                          */
 /*   按预设序列轮流产出 FOCUSED/PLAYING_PHONE/AWAY/DROWSY 对应的        */
-/*   observation_t, 不调 MiMo, 不走去抖 (mock 本身已是稳定结果)         */
+/*   observation_t, 不调云端 VLM, 不走去抖 (mock 本身已是稳定结果)       */
 /* ------------------------------------------------------------------ */
 
 #ifdef PERCEPTION_MOCK
@@ -501,18 +509,13 @@ int perception_init(const char *api_url, const char *api_key)
     if (api_url) {
         snprintf(g_api_url, sizeof(g_api_url), "%s", api_url);
     } else {
-        snprintf(g_api_url, sizeof(g_api_url), "%s", MIMO_ENDPOINT_DEFAULT);
+        snprintf(g_api_url, sizeof(g_api_url), "%s", VLM_ENDPOINT_DEFAULT);
     }
     if (api_key) {
         snprintf(g_api_key, sizeof(g_api_key), "%s", api_key);
     } else {
-        snprintf(g_api_key, sizeof(g_api_key), "%s", MIMO_API_KEY_DEFAULT);
+        snprintf(g_api_key, sizeof(g_api_key), "%s", VLM_API_KEY_DEFAULT);
     }
-
-#ifndef PERCEPTION_MOCK
-    /* 设置 HTTP 鉴权 (Authorization: Bearer), 供 MiMo API 使用 */
-    wifi_set_http_auth(g_api_key);
-#endif
 
     memset(g_history, 0, sizeof(g_history));
     g_history_count = 0;
@@ -532,31 +535,16 @@ int perception_process(uint8_t *jpeg, size_t jpeg_len, observation_t *out)
     }
 
 #ifdef PERCEPTION_MOCK
-    /* 阶段 1: mock —— 不调 MiMo, 按预设序列轮流产出 observation */
+    /* 阶段 1: mock —— 不调云端 VLM, 按预设序列轮流产出 observation */
     *out = mock_observation(g_mock_seq++);
 #else
-    /* 阶段 2: 真实链路 —— 每帧都调 MiMo 识图, 再去抖稳定 */
+    /* 阶段 2: 真实链路 —— 每帧都调云端 VLM 识图, 再去抖稳定 */
     cloud_result_t raw;
     memset(&raw, 0, sizeof(raw));
-    int ret = mimo_detect(jpeg, jpeg_len, &raw);
+    int ret = cloud_detect(jpeg, jpeg_len, &raw);
     if (ret != FOCUS_OK) {
-        /* 打印响应 body (跳过 HTTP 头), 便于定位解析失败原因 */
-        const char *b = g_resp;
-        const char *he = strstr(b, "\r\n\r\n");
-        if (he != NULL) {
-            b = he + 4;
-        }
-
-        printf("[percep] MiMo 识图失败 ret=%d body=%.240s\n", ret, b);
         return ret;
     }
-
-    /* 云端原始结果打点, 便于真机核对 MiMo 到底识别出了什么 */
-    printf("[percep] MiMo person=%d phone=%d inhand=%d pitch=%.1f "
-           "motion=%.2f conf=%.2f\n",
-           (int)raw.person_detected, (int)raw.phone_detected,
-           (int)raw.phone_in_hand, raw.head_pitch,
-           raw.hand_motion, raw.confidence);
 
     perception_debounce_push(&raw);
     perception_debounce_compute(out, perception_monotonic_ms());
