@@ -14,23 +14,7 @@ FOCUS AIoT 在 ESP32-S3-EYE 上采集学习状态，并通过 240×240 LCD 展�
 - 提醒消息以 500ms 周期闪烁，鼓励消息使用绿色渐变，三秒后自动恢复监测页面。
 - 中文点阵字库支持项目内置提醒、页面标题和本地建议。未收录字符显示问号，生成脚本可按需要追加字符。
 - MiMo 请求使用 `wifi_http_post()`；网络失败或响应为空时生成本地建议。
-- 监测页右上角提供 112×84 的实时摄像头预览；320×240 RGB565 源帧采用
-  最近邻缩放后写入 LCD framebuffer，并在 JPEG/云端识图之前刷新。
 - LCD 和 Wi-Fi 模拟后端可通过 Kconfig 关闭。真实驱动合入后不需要修改 UI 页面代码。
-
-监测页布局（LCD 实际分辨率 240×240）：
-
-```text
-┌────────────────────────┐
-│ 严格/鼓励          计时 │
-│ ┌────────┐ ┌──────────┐ │
-│ │ 状态图标 │ │ 摄像头预览 │ │  ← 112×84，实时更新
-│ └────────┘ └──────────┘ │
-│ 有效时长   分心次数      │
-│ 专注度       进度条       │
-│ 里程碑（鼓励模式）       │
-└────────────────────────┘
-```
 
 ## 目录结构
 
@@ -60,10 +44,9 @@ logs/                    # AI Coding 日志目录
 
 ```c
 int lcd_show_status(device_status_t status, session_stats_t *stats,
-                    study_state_t *study_state);
+                    void *study_state);
 int lcd_show_report(session_report_t *report, const char *advice);
 int lcd_show_message(const char *message, action_t type);
-int lcd_show_preview(const uint8_t *rgb565, int src_w, int src_h);
 int mimo_get_advice(session_stats_t *stats, uint8_t by_type[4],
                     char *output, size_t output_size);
 ```
