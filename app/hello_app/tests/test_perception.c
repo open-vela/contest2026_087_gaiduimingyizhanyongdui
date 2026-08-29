@@ -17,30 +17,6 @@
 #include "../api/perception.h"
 #include "../perception/perception_internal.h"
 
-/* ======================================================================
- * 返回码定义（临时，后续应移到公共头文件）
- * ====================================================================== */
-#ifndef FOCUS_OK
-#define FOCUS_OK                            0
-#endif
-
-#ifndef FOCUS_ERR_PERCEP_PARAM
-#define FOCUS_ERR_PERCEP_PARAM             -1
-#endif
-
-#ifndef FOCUS_ERR_PERCEP_TIMEOUT
-#define FOCUS_ERR_PERCEP_TIMEOUT           -2
-#endif
-
-#ifndef FOCUS_ERR_PERCEP_JSON
-#define FOCUS_ERR_PERCEP_JSON              -3
-#endif
-
-#ifndef FOCUS_ERR_PERCEP_NODATA
-#define FOCUS_ERR_PERCEP_NODATA            -4
-#endif
-/* ====================================================================== */
-
 static int g_checks = 0;
 static int g_fail   = 0;
 
