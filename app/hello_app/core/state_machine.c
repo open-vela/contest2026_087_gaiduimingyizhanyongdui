@@ -94,6 +94,9 @@ static void transition_to(device_status_t next)
                      ? names[next]   : "?";
 
   g_state = next;
+  /* 强制 UI 立即刷新: 否则 1Hz 节流会让模式选择/报告界面滞后一拍。
+   * (start_session 也会置 0, 此处统一覆盖所有转移, 长按/短按/停止即时上屏) */
+  g_last_ui_ms = 0;
   printf("[state_machine] %s -> %s\n", from, to);
 }
 
