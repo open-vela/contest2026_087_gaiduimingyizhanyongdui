@@ -252,6 +252,8 @@ int main(int argc, char *argv[])
         uint8_t *jpeg_buf = malloc(320 * 240 * 3);
         observation_t obs;
         int frame_tick = 0;
+        device_status_t st = DEVICE_IDLE;          /* 当前设备状态 (采集门控) */
+        device_status_t prev_status = DEVICE_IDLE; /* 上一 tick 状态, 检测"刚进入 MONITORING" */
 
         memset(&obs, 0, sizeof(obs));
         if (frame == NULL || jpeg_buf == NULL)
@@ -259,7 +261,7 @@ int main(int argc, char *argv[])
             printf("[core] 帧缓冲分配失败, 感知暂停\n");
         }
 
-        printf("[core] 进入主循环: 状态机 @10Hz + 感知 @5s/帧...\n");
+        printf("[core] 进入主循环: 状态机 @10Hz + 感知 @5s/帧 (仅 MONITORING 采集)...\n");
         printf("[core] 真实按键: 长按进模式选择, 短按开始, 超长按停止\n\n");
 
         /* ---- 主循环: state_machine + 感知驱动 ---- */
@@ -267,10 +269,24 @@ int main(int argc, char *argv[])
         {
             state_machine_tick();   /* 内部 behavior_analyze 消费感知历史 */
 
+            /* 采集门控: 仅 DEVICE_MONITORING 采帧喂感知。
+             * IDLE/MODE_SELECT/REPORT 不采集 → 一进 hello_app 不再莫名识图、
+             * 模式选择界面不被识图延迟拖累、超长按停止后立即停采。 */
+            st = state_machine_get_status();
+            if (st == DEVICE_MONITORING && prev_status != DEVICE_MONITORING)
+            {
+                frame_tick = 49;  /* 刚确认模式: 下一 tick (~100ms) 立即采首帧 */
+            }
+            prev_status = st;
+
             /* 每 50 tick (5s) 采一帧喂感知, 更新 history 供行为引擎 */
             if (++frame_tick >= 50)
             {
                 frame_tick = 0;
+                if (st != DEVICE_MONITORING)
+                {
+                    continue;  /* 非监测状态不采集 */
+                }
 #ifdef PERCEPTION_MOCK
                 /* mock: 假帧驱动 (perception 内部走 mock_observation) */
                 if (frame != NULL)
