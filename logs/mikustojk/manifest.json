@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "team_id": "contest2026_087_gaiduimingyizhanyongdui",
+  "github_login": "mikustojk",
+  "generator": "codex-backfill@1.0.0",
+  "updated_at": "2026-09-15T02:51:09.392Z",
+  "sessions": [
+    {
+      "session_id": "019f49a2-8678-72f0-9f5d-8149357b51a2",
+      "tool": "codex",
+      "started_at": "2026-07-10T01:27:13.641Z",
+      "last_event_at": "2026-09-15T02:51:04.101Z",
+      "event_count": 1241,
+      "raw_event_count": 3885,
+      "source_segments": 7,
+      "file_path": "logs/mikustojk/2026-07-10/codex__019f49a2-8678-72f0-9f5d-8149357b51a2.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "backfill_note": "codex rollout mapped by codex-backfill.py",
+      "model": "deepseek-v4-flash"
+    }
+  ]
+}
