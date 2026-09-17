@@ -175,7 +175,7 @@ static void test_away_and_drowsy(void)
     assert(state.focus_score_delta == -20);
 }
 
-static void test_gentle_threshold_and_accumulated_reminders(void)
+static void test_gentle_immediate_reaction_and_cooldown(void)
 {
     study_state_t state;
 
@@ -183,26 +183,31 @@ static void test_gentle_threshold_and_accumulated_reminders(void)
     behavior_init(MODE_GENTLE);
     append_observation(focused_obs(0));
     append_observation(phone_obs(5000, 0.8f));
-    append_observation(phone_obs(10000, 0.8f));
-    append_observation(phone_obs(15000, 0.8f));
-    state = analyze_history();
-    assert(state.status == FOCUSED); /* gentle phone threshold is 15s. */
 
-    append_observation(phone_obs(20000, 0.8f));
-    state = analyze_history();
-    assert(state.status == PLAYING_PHONE);
-    assert(state.action == NONE); /* first of three gentle reminders */
-
-    append_observation(phone_obs(25000, 0.8f));
-    state = analyze_history();
-    assert(state.status == PLAYING_PHONE);
-    assert(state.action == NONE);
-
-    append_observation(phone_obs(30000, 0.8f));
+    /* 鼓励模式的阈值同样置 0: 分心一出现就立即计入并扣分, 不等待
+     * (remind_after_n_times = 1, 首次即提醒)。 */
     state = analyze_history();
     assert(state.status == PLAYING_PHONE);
     assert(state.action == REMIND);
     assert(strcmp(state.message, "休息好了就继续吧~") == 0);
+    assert(state.focus_score_delta == -5);
+
+    /* 同一帧在更快的状态机 tick 上被重复观察, 不应重复提醒 */
+    state = analyze_history();
+    assert(state.status == PLAYING_PHONE);
+    assert(state.action == NONE);
+    assert(state.message[0] == '\0');
+
+    /* 鼓励模式冷却 35s: 上次提醒在 5000ms, 冷却到 40000ms */
+    append_observation(phone_obs(30000, 0.8f));
+    state = analyze_history();
+    assert(state.status == PLAYING_PHONE);
+    assert(state.action == NONE);
+
+    append_observation(phone_obs(45000, 0.8f));
+    state = analyze_history();
+    assert(state.status == PLAYING_PHONE);
+    assert(state.action == REMIND);
     assert(state.focus_score_delta == -5);
 }
 
@@ -243,7 +248,7 @@ int main(void)
     test_strict_phone_and_cooldown();
     test_glancing_phone();
     test_away_and_drowsy();
-    test_gentle_threshold_and_accumulated_reminders();
+    test_gentle_immediate_reaction_and_cooldown();
     test_gentle_milestones_are_not_repeated();
     puts("focus_aiot behavior tests passed");
     return 0;

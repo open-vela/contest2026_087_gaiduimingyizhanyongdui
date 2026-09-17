@@ -157,9 +157,11 @@ static void test_process_and_history(void)
     CHECK(perception_get_history(hist, 10) == 8);
     CHECK(perception_get_history(hist, 3)  == 3);
 
-    /* mock 轮转应覆盖 person=false 与 phone=true 两种情况 */
+    /* mock 应覆盖 person=false 与 phone=true 两种情况。
+     * mock 按 MOCK_HOLD_FRAMES(=5) 帧/状态 轮转 4 个状态, 完整一圈 20 帧;
+     * 必须跑满一圈才能同时看到这两种。 */
     bool saw_away = false, saw_phone = false;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 20; i++) {
         CHECK(perception_process(dummy, sizeof(dummy), &obs) == FOCUS_OK);
         if (!obs.person_present) saw_away = true;
         if (obs.phone_detected)  saw_phone = true;
