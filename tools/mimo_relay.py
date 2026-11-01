@@ -21,6 +21,14 @@ FOCUS AIoT - MiMo HTTPS 中继 (tools/mimo_relay.py)
 
 安全:
   RELAY_TOKEN 用于防止公网其他人蹭用 MiMo 额度 (未设置则不校验, 仅限内网测试)。
+
+网页端 (新增):
+  GET /login        登录页 (演示鉴权, 无真实后端)
+  GET /history      学习历史记录页 (需要本地登录态, 数据为演示数据 + 真实报告)
+  GET /history.json 历史记录数据接口
+  POST /api/login   演示登录接口, 只回一个本地会话标识, 不校验密码
+  GET /preview      (原有) 实时画面预览
+  GET /report       (原有) 单次学习报告
 """
 
 import base64
@@ -31,6 +39,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 # MiMo 专属 endpoint (tokenplan)
 MIMO_URL = os.environ.get(
@@ -41,7 +50,7 @@ MIMO_URL = os.environ.get(
 # MiMo 的 API key (放在服务器, 不必烧进设备)
 MIMO_API_KEY = os.environ.get(
     "MIMO_API_KEY",
-    "tp-cqhvcy96byytd23azumypy2925bpmilukor7fp3k2tu8h5ew",
+    "tp-chi5rilj9dbox2n7kcx3esep6mzi2r5b1knu6wl8wf2cped5",
 )
 
 # 中继访问令牌: 设备 Authorization: Bearer <RELAY_TOKEN>
@@ -60,6 +69,15 @@ DETECT_TIMEOUT = float(os.environ.get("DETECT_TIMEOUT", "15"))
 # 学习报告: 设备一局结束 POST 统计到 /report, 中继调 MiMo 生成建议并存储,
 # 浏览器 GET /report 查看完整报告 (设备屏仅 240x240, 显示不下长文本)。
 REPORT_JSON_PATH = os.environ.get("REPORT_JSON_PATH", "/tmp/report.json")
+
+# 历史记录: 每完成一局, 中继把本局摘要追加到这个 JSONL 文件 (一行一条),
+# 网页 /history 从这里读真实记录。REPORT_JSON_PATH 只保存"最新一局",
+# 本文件负责"多局累积"。
+HISTORY_PATH = os.environ.get("HISTORY_PATH", "/tmp/focus_history.jsonl")
+# 历史为空时是否用固定的演示数据兜底 (首次部署/演示用)
+HISTORY_SEED_DEMO = os.environ.get("HISTORY_SEED_DEMO", "1") != "0"
+# 历史最多保留的条数 (超出后按时间丢弃最旧的)
+HISTORY_MAX_ROWS = int(os.environ.get("HISTORY_MAX_ROWS", "500"))
 
 # 让 MiMo 生成学习建议的提示词 —— 两种模式各一套, 风格差异明显, 便于对比展示。
 REPORT_PROMPT_STRICT = (
@@ -107,7 +125,7 @@ def compute_achievements(stats, distraction_by_type):
 
     阈值留出梯度：常规一局能拿 3~5 项，90 分 / 60 分钟 / 零分心属于挑战项。
     判据全部来自设备实际上报的四项统计（总时长、有效时长、专注度、分类分心次数），
-    不引入额外数据源，设备固件无需改动。
+    不引入额外数据源。
     """
     total_min = int(stats.get("total_min", 0))
     eff_min = int(stats.get("effective_min", 0))
@@ -427,6 +445,790 @@ setInterval(load, 5000);
 """
 
 
+# ====================================================================
+# 网页端扩展 (登录 / 历史记录) —— 纯前端演示, 未接真实鉴权
+# ====================================================================
+
+# 统一注入到每个页面的顶部导航。
+# 用 position:fixed 脱离文档流, 因此不改变各页面原有 flex 布局;
+# body 只额外补一点上边距, 原有 .wrap / .card 结构与脚本一行未动。
+NAV_HTML = """
+<style>
+  .fnav{position:fixed;top:0;left:0;right:0;height:56px;z-index:80;
+        display:flex;align-items:center;gap:6px;padding:0 18px;
+        background:rgba(11,18,32,.92);backdrop-filter:blur(12px);
+        border-bottom:1px solid #22304a;
+        font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  .fnav .brand{display:flex;align-items:center;gap:9px;color:#eef4ff;
+        font-size:14.5px;font-weight:600;letter-spacing:.4px;
+        text-decoration:none;margin-right:14px}
+  .fnav .brand i{width:9px;height:9px;border-radius:3px;background:#00c853;
+        box-shadow:0 0 10px rgba(0,200,83,.85);display:block}
+  .fnav .nav{display:flex;gap:4px;margin-right:auto}
+  .fnav .nav a{color:#91a0b5;text-decoration:none;font-size:13.5px;
+        padding:7px 13px;border-radius:8px;transition:.15s;white-space:nowrap}
+  .fnav .nav a:hover{color:#eef4ff;background:#131e30}
+  .fnav .nav a.on{color:#04120a;background:#00c853;font-weight:600}
+  .fnav .userbox{position:relative;display:flex;align-items:center}
+  .fnav .loginbtn{color:#eef4ff;text-decoration:none;font-size:13.5px;
+        border:1px solid #22304a;background:#131e30;padding:7px 15px;
+        border-radius:8px;transition:.15s;white-space:nowrap}
+  .fnav .loginbtn:hover{border-color:#00c853;color:#00c853}
+  .fnav .me{display:none;align-items:center;gap:8px;background:#131e30;
+        border:1px solid #22304a;border-radius:999px;padding:4px 12px 4px 4px;
+        color:#eef4ff;font-size:13.5px;cursor:pointer;font-family:inherit;
+        transition:.15s}
+  .fnav .me:hover{border-color:#3a4a66}
+  .fnav .me.on{display:inline-flex}
+  .fnav .av{width:26px;height:26px;border-radius:50%;background:#00c853;
+        color:#04120a;font-weight:700;font-size:12.5px;display:flex;
+        align-items:center;justify-content:center}
+  .fnav .menu{position:absolute;top:44px;right:0;min-width:196px;display:none;
+        background:#131e30;border:1px solid #22304a;border-radius:12px;
+        padding:6px;box-shadow:0 16px 40px rgba(0,0,0,.55)}
+  .fnav .menu.on{display:block}
+  .fnav .menu .hi{padding:9px 11px 10px;color:#5d6b80;font-size:11.5px;
+        border-bottom:1px solid #22304a;margin-bottom:4px;word-break:break-all;
+        line-height:1.5}
+  .fnav .menu a,.fnav .menu button{display:block;width:100%;text-align:left;
+        background:none;border:0;color:#91a0b5;font-size:13px;padding:9px 11px;
+        border-radius:8px;cursor:pointer;text-decoration:none;
+        font-family:inherit;transition:.15s}
+  .fnav .menu a:hover,.fnav .menu button:hover{background:#0f1a2b;color:#eef4ff}
+  .fnav .menu .out:hover{color:#ff5252}
+  body{padding-top:76px !important}
+  @media (max-width:600px){
+    .fnav .brand span{display:none}
+    .fnav .nav a{padding:7px 9px;font-size:13px}
+  }
+</style>
+<header class="fnav">
+  <a class="brand" href="/preview"><i></i><span>FOCUS AIoT</span></a>
+  <nav class="nav">
+    <a href="/preview">实时预览</a>
+    <a href="/report">学习报告</a>
+    <a href="/history">历史记录</a>
+  </nav>
+  <div class="userbox">
+    <a class="loginbtn" id="fnavLogin" href="/login">登录</a>
+    <button class="me" id="fnavMe" type="button">
+      <span class="av" id="fnavAv">U</span><span id="fnavName">用户</span>
+    </button>
+    <div class="menu" id="fnavMenu">
+      <div class="hi" id="fnavWho"></div>
+      <a href="/history">我的学习记录</a>
+      <a href="/report">本次学习报告</a>
+      <button class="out" id="fnavLogout" type="button">退出登录</button>
+    </div>
+  </div>
+</header>
+<script>
+(function(){
+  var K = 'focus_user';
+  function readUser(){
+    try { return JSON.parse(localStorage.getItem(K) || 'null'); }
+    catch (e) { return null; }
+  }
+  var u = readUser();
+  var login = document.getElementById('fnavLogin');
+  var me    = document.getElementById('fnavMe');
+  var menu  = document.getElementById('fnavMenu');
+
+  if (u) {
+    login.style.display = 'none';
+    me.className = 'me on';
+    document.getElementById('fnavName').textContent = u.name || '用户';
+    document.getElementById('fnavAv').textContent =
+      (u.name || 'U').slice(0, 1).toUpperCase();
+    document.getElementById('fnavWho').textContent =
+      '已登录 · ' + (u.account || '');
+  } else {
+    login.href = '/login?next=' +
+      encodeURIComponent(location.pathname + location.search);
+  }
+
+  me.addEventListener('click', function(e){
+    e.stopPropagation();
+    menu.className = menu.className === 'menu on' ? 'menu' : 'menu on';
+  });
+  document.addEventListener('click', function(){ menu.className = 'menu'; });
+
+  document.getElementById('fnavLogout').addEventListener('click', function(){
+    localStorage.removeItem(K);
+    try { document.cookie = 'focus_user=;path=/;max-age=0'; } catch (e) {}
+    location.href = '/login';
+  });
+
+  // 当前页高亮
+  var here = location.pathname;
+  var links = document.querySelectorAll('.fnav .nav a');
+  for (var i = 0; i < links.length; i++) {
+    if (links[i].getAttribute('href') === here) links[i].className = 'on';
+  }
+})();
+</script>
+"""
+
+
+# 登录页: 左侧品牌介绍 + 右侧表单。演示环境, 任意账号密码均可登录。
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · FOCUS AIoT</title>
+<style>
+  :root{--bg:#0b1220;--card:#131e30;--line:#22304a;--fg:#eef4ff;
+        --muted:#91a0b5;--ok:#00c853;--warn:#ffb300;--err:#ff5252}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;color:var(--fg);
+       font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:radial-gradient(820px 460px at 10% -12%,rgba(0,200,83,.16),transparent 62%),
+                  radial-gradient(700px 420px at 98% 4%,rgba(0,120,255,.12),transparent 60%),
+                  var(--bg);
+       display:flex;align-items:center;justify-content:center;padding:76px 18px 40px}
+  .shell{width:100%;max-width:920px;display:grid;grid-template-columns:1fr .92fr;
+         background:var(--card);border:1px solid var(--line);border-radius:20px;
+         overflow:hidden;box-shadow:0 26px 70px rgba(0,0,0,.5)}
+  .brand{padding:40px 34px;border-right:1px solid var(--line);
+         background:linear-gradient(155deg,#101c2e,#0b1220 65%);
+         position:relative;overflow:hidden}
+  .brand:after{content:"";position:absolute;width:280px;height:280px;
+         right:-100px;bottom:-120px;border-radius:50%;
+         background:radial-gradient(circle,rgba(0,200,83,.22),transparent 68%)}
+  .logo{display:flex;align-items:center;gap:10px;font-size:15px;
+         font-weight:600;letter-spacing:.6px}
+  .logo i{width:10px;height:10px;border-radius:3px;background:var(--ok);
+         box-shadow:0 0 12px rgba(0,200,83,.85);display:block}
+  .brand h1{font-size:27px;line-height:1.4;margin:26px 0 12px;letter-spacing:.5px}
+  .brand p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.9}
+  .bullets{margin:26px 0 0;padding:0;list-style:none;display:flex;
+           flex-direction:column;gap:13px;position:relative;z-index:1}
+  .bullets li{display:flex;gap:11px;align-items:flex-start;font-size:13.5px;
+           color:#c3d0e2;line-height:1.6}
+  .bullets b{display:block;color:var(--fg);font-weight:600;margin-bottom:1px}
+  .ic{flex:0 0 26px;height:26px;border-radius:8px;background:#0f1a2b;
+      border:1px solid var(--line);display:flex;align-items:center;
+      justify-content:center;font-size:12px;color:var(--ok)}
+  .form{padding:38px 34px}
+  .form h2{margin:0 0 6px;font-size:19px}
+  .form .tip{margin:0 0 24px;color:var(--muted);font-size:13px}
+  label{display:block;font-size:12.5px;color:var(--muted);margin:0 0 7px}
+  .field{margin-bottom:16px}
+  .inp{position:relative}
+  .inp input{width:100%;height:44px;background:#0f1a2b;
+      border:1px solid var(--line);border-radius:10px;color:var(--fg);
+      font-size:14px;padding:0 14px;font-family:inherit;outline:none;
+      transition:.15s}
+  .inp input::placeholder{color:#5d6b80}
+  .inp input:focus{border-color:var(--ok);box-shadow:0 0 0 3px rgba(0,200,83,.13)}
+  .eye{position:absolute;right:6px;top:0;height:44px;width:48px;background:none;
+      border:0;color:#5d6b80;cursor:pointer;font-size:12.5px;font-family:inherit}
+  .eye:hover{color:var(--fg)}
+  .row{display:flex;align-items:center;justify-content:space-between;
+      margin:2px 0 20px;font-size:12.5px;color:var(--muted)}
+  .row label{display:flex;align-items:center;gap:7px;margin:0;cursor:pointer;
+      font-size:12.5px}
+  .row input{accent-color:#00c853}
+  .row a{color:var(--ok);text-decoration:none}
+  .btn{width:100%;height:46px;border:0;border-radius:10px;font-size:15px;
+      font-weight:600;font-family:inherit;cursor:pointer;transition:.15s;
+      display:flex;align-items:center;justify-content:center;gap:9px}
+  .btn-main{background:var(--ok);color:#04120a}
+  .btn-main:hover{background:#00e05c}
+  .btn-main:disabled{opacity:.7;cursor:default}
+  .btn-ghost{background:transparent;color:var(--muted);
+      border:1px solid var(--line);margin-top:10px;height:42px;
+      font-size:13.5px;font-weight:500}
+  .btn-ghost:hover{color:var(--fg);border-color:#3a4a66}
+  .msg{min-height:20px;margin:14px 0 0;font-size:12.5px;line-height:1.6}
+  .msg.err{color:var(--err)}
+  .msg.ok{color:var(--ok)}
+  .spin{width:15px;height:15px;border-radius:50%;
+      border:2px solid rgba(4,18,10,.28);border-top-color:#04120a;
+      animation:sp .7s linear infinite;display:none}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .demo{margin-top:20px;background:#0f1a2b;border:1px dashed #2c3d5a;
+      border-radius:10px;padding:11px 13px;font-size:12px;color:#8b9bb1;
+      line-height:1.75}
+  .demo b{color:#c3d0e2;font-weight:600}
+  @media (max-width:820px){
+    .shell{grid-template-columns:1fr}
+    .brand{display:none}
+    .form{padding:30px 22px}
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="brand">
+    <div class="logo"><i></i>FOCUS AIoT</div>
+    <h1>让每一次专注<br>都被记录</h1>
+    <p>端侧视觉识别 + 云端学习教练，<br>把「今天学了多久」变成看得见的数据。</p>
+    <ul class="bullets">
+      <li><span class="ic">◉</span><div><b>实时画面预览</b>设备每 5 秒上传一帧，浏览器直接看</div></li>
+      <li><span class="ic">◈</span><div><b>分心自动归类</b>玩手机 / 看手机 / 离座 / 瞌睡</div></li>
+      <li><span class="ic">✦</span><div><b>双模式教练建议</b>严格模式与鼓励模式随时切换</div></li>
+    </ul>
+  </div>
+
+  <div class="form">
+    <h2>登录你的账户</h2>
+    <p class="tip">登录后可查看历史学习记录与专注趋势</p>
+    <form id="f" autocomplete="off">
+      <div class="field">
+        <label for="acc">手机号 / 邮箱</label>
+        <div class="inp">
+          <input id="acc" type="text" placeholder="请输入手机号或邮箱"
+                 autocomplete="username">
+        </div>
+      </div>
+      <div class="field">
+        <label for="pwd">密码</label>
+        <div class="inp">
+          <input id="pwd" type="password" placeholder="请输入密码"
+                 autocomplete="current-password">
+          <button class="eye" type="button" id="eye">显示</button>
+        </div>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="rm" checked>记住我</label>
+        <a href="#" onclick="return false">忘记密码?</a>
+      </div>
+      <button class="btn btn-main" type="submit" id="submit">
+        <span class="spin" id="spin"></span><span id="btnText">登 录</span>
+      </button>
+      <button class="btn btn-ghost" type="button" id="guest">访客体验（免登录查看）</button>
+      <div class="msg" id="msg"></div>
+    </form>
+    <div class="demo"><b>演示环境</b>：任意账号 + 任意密码均可登录，
+      登录状态仅保存在浏览器本地，未接入真实鉴权服务。</div>
+  </div>
+</div>
+<script>
+(function(){
+  var K = 'focus_user';
+  var next = new URLSearchParams(location.search).get('next') || '/history';
+  var msg = document.getElementById('msg');
+  var pwd = document.getElementById('pwd');
+
+  function show(t, cls){ msg.textContent = t || ''; msg.className = 'msg ' + (cls || ''); }
+
+  document.getElementById('eye').addEventListener('click', function(){
+    var on = pwd.type === 'password';
+    pwd.type = on ? 'text' : 'password';
+    this.textContent = on ? '隐藏' : '显示';
+  });
+
+  try {
+    var u = JSON.parse(localStorage.getItem(K) || 'null');
+    if (u) show('当前已登录：' + (u.name || u.account) + '，可直接进入历史记录', 'ok');
+  } catch (e) {}
+
+  function done(user){
+    localStorage.setItem(K, JSON.stringify(user));
+    try {
+      document.cookie = 'focus_user=' + encodeURIComponent(user.name || '') +
+                        ';path=/;max-age=604800';
+    } catch (e) {}
+    show('登录成功，正在跳转…', 'ok');
+    setTimeout(function(){ location.href = next; }, 550);
+  }
+
+  document.getElementById('f').addEventListener('submit', function(ev){
+    ev.preventDefault();
+    var account = document.getElementById('acc').value.trim();
+    if (!account) { show('请输入手机号或邮箱', 'err'); return; }
+    if (!pwd.value) { show('请输入密码', 'err'); return; }
+
+    var btn  = document.getElementById('submit');
+    var spin = document.getElementById('spin');
+    var txt  = document.getElementById('btnText');
+    btn.disabled = true;
+    spin.style.display = 'block';
+    txt.textContent = '登录中…';
+    show('');
+
+    fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account: account, password: pwd.value})
+    }).then(function(r){ return r.json(); }).then(function(d){
+      if (d && d.ok) { done(d.user); }
+      else { throw new Error((d && d.error) || '登录失败'); }
+    }).catch(function(e){
+      btn.disabled = false;
+      spin.style.display = 'none';
+      txt.textContent = '登 录';
+      show(e.message || '网络异常，请重试', 'err');
+    });
+  });
+
+  document.getElementById('guest').addEventListener('click', function(){
+    done({name: '访客', account: 'guest@demo', token: 'guest',
+          ts: Math.floor(Date.now() / 1000)});
+  });
+})();
+</script>
+</body>
+</html>
+"""
+
+
+# 历史记录页: 概览指标 + 专注度趋势 + 可筛选列表 + 展开详情 (含双模式建议)。
+HISTORY_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>学习历史 · FOCUS AIoT</title>
+<style>
+  :root{--bg:#0b1220;--card:#131e30;--line:#22304a;--fg:#eef4ff;
+        --muted:#91a0b5;--ok:#00c853;--warn:#ffb300;--err:#ff5252;
+        --dim:#5d6b80;--cell:#0f1a2b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);min-height:100vh;
+       font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       display:flex;justify-content:center;padding:76px 16px 44px}
+  .page{width:100%;max-width:880px}
+  /* 页面头 */
+  .ghead{display:flex;justify-content:space-between;align-items:flex-end;
+         gap:14px;flex-wrap:wrap;margin-bottom:18px}
+  .ghead h1{margin:0 0 6px;font-size:22px;letter-spacing:.4px}
+  .ghead .sub{margin:0;color:var(--muted);font-size:13px}
+  .who{display:flex;align-items:center;gap:10px;background:var(--card);
+       border:1px solid var(--line);border-radius:12px;padding:9px 14px}
+  .who .av{width:32px;height:32px;border-radius:50%;background:var(--ok);
+       color:#04120a;font-weight:700;font-size:14px;display:flex;
+       align-items:center;justify-content:center}
+  .who .nm{font-size:13.5px;font-weight:600}
+  .who .ac{font-size:11.5px;color:var(--dim);margin-top:2px}
+  /* 概览 */
+  .summary{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;
+           margin-bottom:14px}
+  .metric{background:var(--card);border:1px solid var(--line);
+          border-radius:12px;padding:14px}
+  .metric .k{color:var(--muted);font-size:12px}
+  .metric .v{font-size:22px;font-weight:700;margin-top:6px;line-height:1.1}
+  .metric .v small{font-size:12px;color:var(--muted);font-weight:500;
+          margin-left:2px}
+  .trend{background:var(--card);border:1px solid var(--line);border-radius:12px;
+         padding:14px 16px 10px;margin-bottom:18px}
+  .trend .th{display:flex;justify-content:space-between;align-items:center;
+         font-size:12.5px;color:var(--muted);margin-bottom:10px}
+  .bars{display:flex;align-items:flex-end;gap:8px;height:76px}
+  .bcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;
+        align-items:center;gap:6px;height:100%}
+  .bcol .bar{width:100%;max-width:34px;border-radius:5px 5px 2px 2px;
+        background:#2c3d5a;transition:.3s}
+  .bcol .lb{font-size:10.5px;color:var(--dim);white-space:nowrap}
+  /* 筛选 */
+  .filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+           margin-bottom:14px}
+  .seg{display:flex;background:var(--card);border:1px solid var(--line);
+       border-radius:10px;padding:3px;gap:2px}
+  .seg button{border:0;background:none;color:var(--muted);font-size:12.5px;
+       padding:6px 12px;border-radius:8px;cursor:pointer;font-family:inherit;
+       transition:.15s;white-space:nowrap}
+  .seg button:hover{color:var(--fg)}
+  .seg button.on{background:#22304a;color:var(--fg);font-weight:600}
+  .seg button.on.g{background:var(--ok);color:#04120a}
+  .hint{margin-left:auto;font-size:12px;color:var(--dim)}
+  /* 列表 */
+  .list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;
+        gap:10px}
+  .item{background:var(--card);border:1px solid var(--line);border-radius:13px;
+        overflow:hidden;transition:.18s}
+  .item:hover{border-color:#2f4a6e}
+  .item.open{border-color:#2f4a6e}
+  .row{display:flex;align-items:center;gap:14px;width:100%;padding:14px 16px;
+       background:none;border:0;color:inherit;font-family:inherit;
+       cursor:pointer;text-align:left}
+  .date{flex:0 0 92px}
+  .date b{display:block;font-size:15px;font-weight:600}
+  .date span{font-size:11.5px;color:var(--dim)}
+  .ring{flex:0 0 46px;width:46px;height:46px;border-radius:50%;
+        display:flex;align-items:center;justify-content:center;
+        position:relative;font-size:13px;font-weight:700;
+        background:conic-gradient(var(--rc) calc(var(--p) * 1%), #1c2a40 0);
+        color:var(--fg)}
+  .ring:before{content:"";position:absolute;inset:4px;border-radius:50%;
+        background:var(--card)}
+  .ring span{position:relative;z-index:1}
+  .meta{flex:1;min-width:0}
+  .meta .t{font-size:13.5px;margin-bottom:6px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font-size:11px;color:#a9b8cc;background:#0f1a2b;border:1px solid #24334c;
+        border-radius:999px;padding:2px 9px}
+  .chip.hot{color:#ffb300;border-color:#4a3b18}
+  .chip.grn{color:var(--ok);border-color:#1b4630}
+  .badge{font-size:11px;padding:2px 8px;border-radius:999px;margin-left:6px}
+  .badge.live{background:rgba(0,200,83,.14);color:var(--ok)}
+  .chev{flex:0 0 auto;color:var(--dim);font-size:15px;transition:.2s}
+  .item.open .chev{transform:rotate(90deg);color:var(--fg)}
+  /* 展开详情 */
+  .detail{display:none;padding:0 16px 16px;border-top:1px solid #1c2a40}
+  .item.open .detail{display:block}
+  .dgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;
+         margin:14px 0}
+  .dcell{background:var(--cell);border-radius:9px;padding:10px 12px}
+  .dcell .k{font-size:11px;color:var(--muted)}
+  .dcell .v{font-size:15px;font-weight:600;margin-top:3px}
+  .dtitle{display:flex;align-items:center;justify-content:space-between;
+          margin:4px 0 8px}
+  .dtitle .h{font-size:12.5px;color:var(--ok);font-weight:600}
+  .dtitle a{font-size:12px;color:var(--muted);text-decoration:none}
+  .dtitle a:hover{color:var(--fg)}
+  .mini{display:flex;gap:6px}
+  .mini button{border:1px solid #22304a;background:#0f1a2b;color:var(--muted);
+          font-size:11.5px;padding:4px 11px;border-radius:7px;cursor:pointer;
+          font-family:inherit;transition:.15s}
+  .mini button.on{background:var(--ok);border-color:var(--ok);
+          color:#04120a;font-weight:600}
+  .mini button.on.gentle{background:var(--warn);border-color:var(--warn)}
+  .adv{background:var(--cell);border-left:3px solid var(--ok);border-radius:8px;
+       padding:12px 14px;font-size:13.5px;line-height:1.8;color:#dbe6f5}
+  .adv.gentle{border-left-color:var(--warn)}
+  /* 空态 / 登录墙 */
+  .empty{text-align:center;color:var(--muted);font-size:13.5px;
+         padding:46px 10px;background:var(--card);border:1px dashed #2c3d5a;
+         border-radius:13px;line-height:2}
+  .gate{display:none;background:var(--card);border:1px solid var(--line);
+        border-radius:16px;padding:38px 26px;text-align:center}
+  .gate.on{display:block}
+  .gate .ic2{width:52px;height:52px;border-radius:16px;margin:0 auto 16px;
+        background:#0f1a2b;border:1px solid var(--line);display:flex;
+        align-items:center;justify-content:center;font-size:20px;color:var(--ok)}
+  .gate h2{margin:0 0 8px;font-size:17px}
+  .gate p{margin:0 0 20px;color:var(--muted);font-size:13px;line-height:1.8}
+  .gate .acts{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+  .gate .btn2{padding:10px 22px;border-radius:10px;font-size:13.5px;
+        text-decoration:none;font-family:inherit;cursor:pointer;border:0;
+        font-weight:600;transition:.15s}
+  .gate .p1{background:var(--ok);color:#04120a}
+  .gate .p1:hover{background:#00e05c}
+  .gate .p2{background:transparent;color:var(--muted);border:1px solid var(--line);
+        font-weight:500}
+  .gate .p2:hover{color:var(--fg);border-color:#3a4a66}
+  .foot{text-align:center;color:var(--dim);font-size:11.5px;margin-top:18px}
+  @media (max-width:720px){
+    .summary{grid-template-columns:repeat(2,1fr)}
+    .dgrid{grid-template-columns:repeat(2,1fr)}
+    .row{gap:10px;padding:12px}
+    .date{flex:0 0 74px}
+    .meta .t{font-size:12.5px}
+    .hint{display:none}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="ghead">
+    <div>
+      <h1>学习历史</h1>
+      <p class="sub" id="sub">加载中…</p>
+    </div>
+    <div class="who" id="who" style="display:none">
+      <div class="av" id="whoAv">U</div>
+      <div><div class="nm" id="whoNm">用户</div><div class="ac" id="whoAc"></div></div>
+    </div>
+  </div>
+
+  <!-- 未登录: 登录墙 -->
+  <div class="gate" id="gate">
+    <div class="ic2">◈</div>
+    <h2>登录后查看完整学习历史</h2>
+    <p>历史记录需要账户身份。<br>登录后可查看每次学习的专注度、分心明细与教练建议。</p>
+    <div class="acts">
+      <a class="btn2 p1" id="gateLogin" href="/login?next=%2Fhistory">立即登录</a>
+      <button class="btn2 p2" type="button" id="gateDemo">先看演示数据</button>
+    </div>
+  </div>
+
+  <div id="content" style="display:none">
+    <div class="summary">
+      <div class="metric"><div class="k">学习节数</div>
+        <div class="v" id="mCnt">--<small>次</small></div></div>
+      <div class="metric"><div class="k">累计有效学习</div>
+        <div class="v" id="mEff">--</div></div>
+      <div class="metric"><div class="k">平均专注度</div>
+        <div class="v" id="mAvg">--<small>分</small></div></div>
+      <div class="metric"><div class="k">最佳专注度</div>
+        <div class="v" id="mMax">--<small>分</small></div></div>
+    </div>
+
+    <div class="trend">
+      <div class="th"><span>专注度趋势（最近 8 次）</span><span id="trendHint"></span></div>
+      <div class="bars" id="bars"></div>
+    </div>
+
+    <div class="filters">
+      <div class="seg" id="segRange">
+        <button class="on" data-d="0" type="button">全部</button>
+        <button data-d="7" type="button">近 7 天</button>
+        <button data-d="30" type="button">近 30 天</button>
+      </div>
+      <div class="seg" id="segMode">
+        <button class="on g" data-m="all" type="button">全部模式</button>
+        <button data-m="strict" type="button">严格</button>
+        <button data-m="gentle" type="button">鼓励</button>
+      </div>
+      <span class="hint" id="hint"></span>
+    </div>
+
+    <ul class="list" id="list"></ul>
+    <div class="empty" id="empty" style="display:none">
+      没有符合条件的学习记录<br>
+      <span style="font-size:12px;color:#5d6b80">设备完成一次学习后会自动出现在这里</span>
+    </div>
+    <div class="foot">历史记录为演示数据，设备真实上报的最近一次学习会置顶显示</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var K = 'focus_user';
+  var USER = null;
+  try { USER = JSON.parse(localStorage.getItem(K) || 'null'); } catch (e) {}
+
+  var ALL = [], RANGE = 0, MODE = 'all', OPEN = {};
+  var GRADE_C = {exc:'#00c853', good:'#66d17a', pass:'#ffb300', low:'#ff5252'};
+
+  var gate = document.getElementById('gate');
+  var content = document.getElementById('content');
+
+  if (!USER) {
+    gate.className = 'gate on';
+    document.getElementById('sub').textContent = '未登录 · 请先登录账户';
+  } else {
+    content.style.display = 'block';
+    document.getElementById('who').style.display = 'flex';
+    document.getElementById('whoNm').textContent = USER.name || '用户';
+    document.getElementById('whoAc').textContent = USER.account || '';
+    document.getElementById('whoAv').textContent =
+      (USER.name || 'U').slice(0, 1).toUpperCase();
+  }
+
+  // 先看演示数据: 生成本地访客态, 但仍留在本页
+  document.getElementById('gateDemo').addEventListener('click', function(){
+    USER = {name: '访客', account: 'guest@demo', token: 'guest',
+            ts: Math.floor(Date.now() / 1000)};
+    localStorage.setItem(K, JSON.stringify(USER));
+    gate.className = 'gate';
+    content.style.display = 'block';
+    document.getElementById('who').style.display = 'flex';
+    document.getElementById('whoNm').textContent = '访客';
+    document.getElementById('whoAc').textContent = 'guest@demo';
+    document.getElementById('whoAv').textContent = '访';
+    document.getElementById('sub').textContent = '演示数据视图';
+    var lg = document.getElementById('fnavLogin');
+    if (lg) lg.style.display = 'none';
+    var me = document.getElementById('fnavMe');
+    if (me) {
+      me.className = 'me on';
+      document.getElementById('fnavName').textContent = '访客';
+      document.getElementById('fnavAv').textContent = '访';
+      document.getElementById('fnavWho').textContent = '已登录 · guest@demo';
+    }
+    load();   // 之前未登录时没有拉数据, 这里补上
+  });
+
+  function d2(n){ return (n < 10 ? '0' : '') + n; }
+  function fmtDur(sec){
+    var m = Math.floor(sec / 60), s = sec % 60;
+    if (m >= 60) return Math.floor(m / 60) + ' 小时 ' + (m % 60) + ' 分';
+    return m + ' 分 ' + s + ' 秒';
+  }
+  function fmtMin(sec){
+    var m = Math.round(sec / 60);
+    if (m >= 60) return Math.floor(m / 60) + ' 小时 ' + (m % 60) + ' 分';
+    return m + ' 分钟';
+  }
+  function gradeOf(s){
+    if (s >= 90) return {t:'优秀', c:GRADE_C.exc};
+    if (s >= 75) return {t:'良好', c:GRADE_C.good};
+    if (s >= 60) return {t:'及格', c:GRADE_C.pass};
+    return {t:'需努力', c:GRADE_C.low};
+  }
+  function parts(ts){
+    var d = new Date(ts * 1000);
+    var wd = ['周日','周一','周二','周三','周四','周五','周六'][d.getDay()];
+    return {
+      day: (d.getMonth() + 1) + '/' + d.getDate(),
+      time: wd + ' ' + d2(d.getHours()) + ':' + d2(d.getMinutes())
+    };
+  }
+
+  function render(){
+    var now = Math.floor(Date.now() / 1000);
+    var rows = ALL.filter(function(it){
+      if (RANGE && it.ts < now - RANGE * 86400) return false;
+      if (MODE !== 'all' && (it.mode || 'strict') !== MODE) return false;
+      return true;
+    });
+
+    // 概览
+    var cnt = rows.length;
+    var eff = 0, sum = 0, max = 0;
+    rows.forEach(function(it){
+      eff += it.effective_sec || 0;
+      sum += it.focus_score || 0;
+      if ((it.focus_score || 0) > max) max = it.focus_score;
+    });
+    document.getElementById('mCnt').innerHTML = cnt + '<small>次</small>';
+    document.getElementById('mEff').textContent = cnt ? fmtMin(eff) : '--';
+    document.getElementById('mAvg').innerHTML =
+      cnt ? Math.round(sum / cnt) + '<small>分</small>' : '--';
+    document.getElementById('mMax').innerHTML =
+      cnt ? max + '<small>分</small>' : '--';
+    document.getElementById('hint').textContent =
+      '共 ' + cnt + ' 条记录';
+
+    // 趋势条 (按时间正序取最后 8 次)
+    var trend = rows.slice(0, 8).reverse();
+    var html = '';
+    trend.forEach(function(it){
+      var g = gradeOf(it.focus_score);
+      var h = Math.max(6, Math.round(it.focus_score * 0.72));
+      html += '<div class="bcol"><div class="bar" style="height:' + h +
+              'px;background:' + g.c + '" title="' + it.focus_score + ' 分"></div>' +
+              '<div class="lb">' + parts(it.ts).day + '</div></div>';
+    });
+    document.getElementById('bars').innerHTML = html ||
+      '<div style="color:#5d6b80;font-size:12.5px">暂无数据</div>';
+
+    // 列表
+    var list = document.getElementById('list');
+    var out = '';
+    rows.forEach(function(it, i){
+      var g = gradeOf(it.focus_score);
+      var p = parts(it.ts);
+      var dist = it.distractions || [0, 0, 0, 0];
+      var phone = (dist[0] || 0) + (dist[1] || 0);
+      var away = (dist[2] || 0) + (dist[3] || 0);
+      var modeTxt = (it.mode === 'gentle') ? '鼓励模式' : '严格模式';
+      var open = OPEN[it.id] ? ' open' : '';
+      out += '<li class="item' + open + '" data-id="' + it.id + '">' +
+        '<button class="row" type="button" data-act="toggle">' +
+          '<div class="date"><b>' + p.day + '</b><span>' + p.time + '</span></div>' +
+          '<div class="ring" style="--p:' + (it.focus_score || 0) +
+            ';--rc:' + g.c + '"><span>' + (it.focus_score || 0) + '</span></div>' +
+          '<div class="meta">' +
+            '<div class="t">' + g.t + ' · ' + modeTxt +
+              (it.live ? '<span class="badge live">设备实时</span>' : '') + '</div>' +
+            '<div class="chips">' +
+              '<span class="chip grn">有效 ' + fmtMin(it.effective_sec || 0) + '</span>' +
+              '<span class="chip' + (phone ? ' hot' : '') + '">手机 ' + phone + ' 次</span>' +
+              '<span class="chip">离座/瞌睡 ' + away + ' 次</span>' +
+            '</div>' +
+          '</div>' +
+          '<div class="chev">›</div>' +
+        '</button>' +
+        '<div class="detail">' +
+          '<div class="dgrid">' +
+            '<div class="dcell"><div class="k">总时长</div><div class="v">' +
+              fmtDur(it.total_sec || 0) + '</div></div>' +
+            '<div class="dcell"><div class="k">有效学习</div><div class="v">' +
+              fmtDur(it.effective_sec || 0) + '</div></div>' +
+            '<div class="dcell"><div class="k">玩手机 / 看手机</div><div class="v">' +
+              (dist[0] || 0) + ' / ' + (dist[1] || 0) + ' 次</div></div>' +
+            '<div class="dcell"><div class="k">离座 / 瞌睡</div><div class="v">' +
+              (dist[2] || 0) + ' / ' + (dist[3] || 0) + ' 次</div></div>' +
+          '</div>' +
+          '<div class="dtitle"><span class="h">教练建议</span>' +
+            '<span class="mini" data-id="' + it.id + '">' +
+              '<button type="button" class="on" data-m="strict">严格</button>' +
+              '<button type="button" data-m="gentle">鼓励</button>' +
+            '</span>' +
+          '</div>' +
+          '<div class="adv" data-adv="' + it.id + '">' +
+            (it.advice || '(暂无建议)') + '</div>' +
+        '</div>' +
+      '</li>';
+    });
+    list.innerHTML = out;
+    document.getElementById('empty').style.display = cnt ? 'none' : 'block';
+  }
+
+  // 事件委托: 展开 / 收起
+  document.getElementById('list').addEventListener('click', function(ev){
+    var rowBtn = ev.target.closest ? ev.target.closest('.row') : null;
+    if (rowBtn) {
+      var li = rowBtn.parentNode;
+      var id = li.getAttribute('data-id');
+      OPEN[id] = !OPEN[id];
+      li.className = 'item' + (OPEN[id] ? ' open' : '');
+      return;
+    }
+    var mb = ev.target.closest ? ev.target.closest('.mini button') : null;
+    if (mb) {
+      ev.stopPropagation();
+      var box = mb.parentNode;
+      var iid = box.getAttribute('data-id');
+      var mode = mb.getAttribute('data-m');
+      var btns = box.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) btns[i].className = '';
+      mb.className = 'on' + (mode === 'gentle' ? ' gentle' : '');
+      var it = null;
+      for (var j = 0; j < ALL.length; j++) if (ALL[j].id === iid) it = ALL[j];
+      if (!it) return;
+      var adv = document.querySelector('[data-adv="' + iid + '"]');
+      adv.textContent = (mode === 'gentle'
+        ? (it.advice_gentle || it.advice) : it.advice) || '(暂无建议)';
+      adv.className = 'adv' + (mode === 'gentle' ? ' gentle' : '');
+    }
+  });
+
+  // 筛选
+  document.getElementById('segRange').addEventListener('click', function(ev){
+    var b = ev.target.closest ? ev.target.closest('button') : null;
+    if (!b) return;
+    RANGE = parseInt(b.getAttribute('data-d'), 10) || 0;
+    var bs = this.querySelectorAll('button');
+    for (var i = 0; i < bs.length; i++) bs[i].className = '';
+    b.className = 'on';
+    render();
+  });
+
+  document.getElementById('segMode').addEventListener('click', function(ev){
+    var b = ev.target.closest ? ev.target.closest('button') : null;
+    if (!b) return;
+    MODE = b.getAttribute('data-m');
+    var bs = this.querySelectorAll('button');
+    for (var i = 0; i < bs.length; i++) bs[i].className = '';
+    b.className = (MODE === 'all' ? 'on g' : 'on');
+    render();
+  });
+
+  // 拉数据
+  function load(){
+    fetch('/history.json?t=' + Date.now(), {cache: 'no-store'})
+      .then(function(r){ if (!r.ok) throw new Error('no data'); return r.json(); })
+      .then(function(d){
+        ALL = (d && d.items) || [];
+        if (!USER) {
+          document.getElementById('sub').textContent = '未登录 · 请先登录账户';
+          return;
+        }
+        document.getElementById('sub').textContent =
+          (USER.name || '用户') + ' · 共 ' + ALL.length + ' 次学习记录';
+        render();
+      })
+      .catch(function(){
+        document.getElementById('sub').textContent = '数据加载失败，请刷新重试';
+      });
+  }
+  if (USER) load();
+
+  document.getElementById('gateLogin').href =
+    '/login?next=' + encodeURIComponent('/history');
+})();
+</script>
+</body>
+</html>
+"""
+
+
 def rgb565_to_jpeg_bytes(data, width=320, height=240):
     """RGB565 原始帧 → JPEG 字节流 (设备端不做编码时, 由本中继代做)。
 
@@ -504,6 +1306,175 @@ def generate_advice(stats, mode="strict"):
     return _local_advice(stats, want)
 
 
+# --------------------------------------------------------------------
+# 历史记录演示数据 (无真实后端: 固定 8 条, 时间相对今天递减)
+# --------------------------------------------------------------------
+
+HISTORY_SEED_ROWS = [
+    # 天前, 时, 分, 总秒, 有效秒, [玩, 看, 离座, 瞌睡], 分数, 模式, 严格, 鼓励
+    (1, 20, 14, 2700, 2280, [3, 2, 1, 0], 72, "strict",
+     "45 分钟里分心 6 次, 其中玩手机 3 次, 专注度只有 72 分。"
+     "手机放在手边就是你最大的干扰源, 下次学习前把它放进包里, 不要给自己留退路。",
+     "你今天稳稳学了 45 分钟, 有效时间有 38 分钟, 这已经超过大多数人了。"
+     "如果下次能把手机放进抽屉, 你会发现专注其实很轻松。"),
+    (2, 19, 40, 3600, 3420, [1, 1, 0, 0], 88, "gentle",
+     "这一节 60 分钟只分心 2 次, 专注度 88 分, 说明你完全有能力做到。"
+     "但有效时长还差 3 分钟, 别在最后阶段松懈, 收尾也要撑住。",
+     "60 分钟里几乎没怎么分心, 专注度 88 分, 这个状态很棒! "
+     "下次可以试着把单次学习拉长到 75 分钟, 你会更适应深度状态。"),
+    (4, 21, 5, 1800, 1290, [4, 3, 2, 1], 54, "strict",
+     "30 分钟里玩手机 4 次、看手机 3 次, 有效学习只有 21 分钟, 专注度 54 分不及格。"
+     "你不是不会学, 是根本没坐下来, 先把手机拿出房间再开始。",
+     "这次只学了 30 分钟, 你还是坚持下来了, 有效时间也有 21 分钟。"
+     "下次学习前先喝口水、把手机放远一点, 状态会好很多。"),
+    (6, 16, 30, 4500, 4260, [0, 1, 0, 0], 94, "gentle",
+     "75 分钟有效学习 71 分钟, 专注度 94 分, 这是标准答案级别的表现。"
+     "唯一要求: 保持住, 不要因为一次优秀就放松标准。",
+     "75 分钟里几乎没有分心, 专注度 94 分, 太厉害了! "
+     "今天的状态值得记下来, 下次继续用同样的节奏就好。"),
+    (9, 20, 0, 2400, 1980, [2, 2, 1, 0], 76, "strict",
+     "40 分钟分心 5 次, 有效 33 分钟, 专注度 76 分刚过良好线。"
+     "问题在于你每次都只中断十几秒, 但注意力重建要花更久, 要么不碰手机, 要么就别开始。",
+     "40 分钟里大部分时间都在学, 专注度 76 分, 已经不错了。"
+     "下次遇到想拿手机的冲动, 先在纸上记一笔, 等这一轮结束再处理。"),
+    (13, 19, 10, 1500, 960, [5, 4, 2, 1], 48, "strict",
+     "25 分钟玩手机 5 次、看手机 4 次, 有效学习只有 16 分钟, 专注度 48 分。"
+     "这个数据说明本次学习基本没进入状态, 重新从 15 分钟不带手机开始练。",
+     "这次只坚持了 25 分钟, 但你愿意坐下来就已经是进步。"
+     "明天试试 15 分钟的小目标, 完成后再奖励自己看手机, 慢慢就顺了。"),
+    (16, 15, 0, 3300, 3120, [1, 0, 0, 0], 91, "gentle",
+     "55 分钟只分心 1 次, 专注度 91 分, 有效学习 52 分钟。"
+     "做得对的地方是不给自己找借口, 继续保持这个强度。",
+     "55 分钟里几乎全程在线, 专注度 91 分, 你越来越稳了。"
+     "记得中间起来活动一下, 别让身体先累。"),
+    (22, 20, 30, 2700, 2160, [2, 3, 1, 1], 68, "strict",
+     "45 分钟分心 7 次, 有效 36 分钟, 专注度 68 分。"
+     "看手机 3 次、离座和瞌睡各 1 次, 说明你的问题不是手机而是睡眠, 先保证作息再谈专注。",
+     "45 分钟学到了 36 分钟, 专注度 68 分, 已经比上次进步了。"
+     "如果觉得困, 学习前先小睡 15 分钟, 效果会比硬撑好。"),
+]
+
+
+def demo_history():
+    """把 HISTORY_SEED_ROWS 展开成前端要的 items (ts 相对当前时间)。"""
+    now = time.time()
+    items = []
+    for i, row in enumerate(HISTORY_SEED_ROWS):
+        days, hh, mm, total, eff, dist, score, mode, adv_s, adv_g = row
+        t = time.localtime(now - days * 86400)
+        ts = time.mktime((t.tm_year, t.tm_mon, t.tm_mday,
+                          hh, mm, 0, 0, 0, -1))
+        items.append({
+            "id": "demo-%02d" % (i + 1),
+            "ts": int(ts),
+            "total_sec": total,
+            "effective_sec": eff,
+            "distractions": dist,
+            "focus_score": score,
+            "grade": _score_grade(score),
+            "mode": mode,
+            "advice": adv_s,
+            "advice_gentle": adv_g,
+            "live": False,
+            "demo": True,
+        })
+    return items
+
+
+# ---- 真实历史记录 (JSONL 追加) ------------------------------------------
+#
+# 每完成一局, _handle_report 调 _append_history 追加一行; /history.json
+# 调 _load_history 读回来。REPORT_JSON_PATH 只保存"最新一局", 本文件负责
+# "多局累积", 因此历史页看到的是真实的历次学习记录。
+
+def _history_entry(report, ts=None):
+    """把一份 report 压成历史记录的一行。"""
+    st = report.get("stats") or {}
+    score = int(st.get("focus_score", 0))
+    ach = report.get("achievements") or []
+    return {
+        "id": "h-%d" % int(ts if ts is not None else time.time()),
+        "ts": int(ts if ts is not None else time.time()),
+        "total_sec": int(st.get("total_duration_sec", 0)),
+        "effective_sec": int(st.get("effective_duration_sec", 0)),
+        "distractions": report.get("distraction_by_type") or [0, 0, 0, 0],
+        "focus_score": score,
+        "grade": report.get("grade") or _score_grade(score),
+        "mode": st.get("mode", "strict"),
+        "advice": report.get("advice", ""),
+        "advice_gentle": report.get("advice_gentle", ""),
+        "achievements": sum(1 for a in ach if a.get("unlocked")),
+        "live": False,
+        "demo": False,
+    }
+
+
+def _append_history(report):
+    """把一局摘要追加到历史文件。
+
+    设备侧失败会重发 /report, 因此这里按"内容 + 60 秒内"去重, 避免同一局
+    被记成两条。写失败不影响主流程 (报告已单独落盘)。
+    """
+    try:
+        entry = _history_entry(report)
+        prev = None
+        if os.path.exists(HISTORY_PATH):
+            with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+                lines = [ln for ln in f if ln.strip()]
+            if lines:
+                try:
+                    prev = json.loads(lines[-1])
+                except Exception:  # noqa: BLE001
+                    prev = None
+            if prev and entry["ts"] - int(prev.get("ts", 0)) <= 60 and \
+               prev.get("focus_score") == entry["focus_score"] and \
+               prev.get("total_sec") == entry["total_sec"] and \
+               list(prev.get("distractions") or []) == list(entry["distractions"]):
+                return False
+        with open(HISTORY_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        _trim_history()
+        return True
+    except Exception as e:  # noqa: BLE001
+        print("[relay] history append failed: %s" % e)
+        return False
+
+
+def _trim_history():
+    """只保留最近 HISTORY_MAX_ROWS 条。"""
+    try:
+        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+            lines = [ln for ln in f if ln.strip()]
+        if len(lines) <= HISTORY_MAX_ROWS:
+            return
+        tmp = HISTORY_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(lines[-HISTORY_MAX_ROWS:])
+        os.replace(tmp, HISTORY_PATH)
+    except Exception as e:  # noqa: BLE001
+        print("[relay] history trim failed: %s" % e)
+
+
+def _load_history():
+    """读回全部历史记录 (坏行跳过)。"""
+    items = []
+    try:
+        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    items.append(json.loads(ln))
+                except Exception:  # noqa: BLE001
+                    continue
+    except FileNotFoundError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        print("[relay] history load failed: %s" % e)
+    return items
+
+
 class RelayHandler(http.server.BaseHTTPRequestHandler):
     # HTTP/1.1 —— 设备端复用同一条 TCP 连接上传每一帧 (约 5s 一帧)。
     # HTTP/1.0 会在每个响应后强制关闭连接, 设备就得每帧重新 connect/close,
@@ -520,6 +1491,12 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
 
+            path = self.path.split("?")[0]
+
+            # 1.5 网页登录 (演示): 网页用户没有设备令牌, 故放在令牌校验之前
+            if path == "/api/login":
+                return self._handle_login(body)
+
             # 2. 校验中继令牌 (设备侧 wifi_set_http_auth 设置)
             if RELAY_TOKEN:
                 auth = self.headers.get("Authorization", "")
@@ -529,7 +1506,7 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
 
             # 2.1 学习报告: 设备一局结束上传统计 → MiMo 生成建议 → 存网页
             #     (路径用 /report; 其余路径一律按识图处理)
-            if self.path.split("?")[0] == "/report":
+            if path == "/report":
                 return self._handle_report(body)
 
             # 2.5 顺带存最新一帧供网页预览 (失败不影响识别转发)
@@ -565,6 +1542,40 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
 
         except Exception as e:  # noqa: BLE001
             self._reply(502, ("{\"error\":\"relay: %s\"}" % e).encode())
+
+    def _handle_login(self, body):
+        """演示用登录: 不校验密码 (无真实后端), 只回一个本地会话标识。
+
+        生产环境应在此接入真实鉴权 (校验账号密码 / 下发 JWT 或 cookie),
+        并把 /history 与 /history.json 的访问纳入登录态校验。
+        """
+        try:
+            data = json.loads(body.decode("utf-8", "replace") or "{}")
+        except Exception:  # noqa: BLE001
+            data = {}
+        account = (data.get("account") or "").strip()
+        if not account:
+            return self._reply(400,
+                               b'{"ok":false,"error":"\\u8bf7\\u8f93\\u5165\\u624b\\u673a\\u53f7\\u6216\\u90ae\\u7bb1"}')
+
+        # 展示名: 邮箱取 @ 前, 手机号取后 4 位
+        if "@" in account:
+            name = account.split("@")[0] or "用户"
+        elif len(account) >= 4:
+            name = "用户" + account[-4:]
+        else:
+            name = account or "用户"
+
+        payload = json.dumps({
+            "ok": True,
+            "user": {
+                "name": name,
+                "account": account,
+                "token": uuid.uuid4().hex,
+                "ts": int(time.time()),
+            },
+        }, ensure_ascii=False).encode()
+        self._reply(200, payload)
 
     def _handle_report(self, body):
         """设备上传学习统计 → 调 MiMo 生成建议 → 存 /tmp/report.json 供网页。
@@ -610,6 +1621,11 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
                   % (report["stats"]["focus_score"], len(advice)))
         except Exception as e:  # noqa: BLE001
             print("[relay] report save failed: %s" % e)
+
+        # 追加到历史记录 (与"最新一局"分开存, 用于 /history 的累积视图)
+        if _append_history(report):
+            print("[relay] history +1 (score=%s)"
+                  % report["stats"]["focus_score"])
 
         self._reply(200, json.dumps({"ok": True, "advice": advice},
                                     ensure_ascii=False).encode())
@@ -704,17 +1720,45 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
         # 网页路由 (POST 转发不受影响)。路径可能带 ?t= 缓存参数, 故按前缀匹配。
         path = self.path.split("?")[0]
         if path == "/preview":
-            self._reply(200, PREVIEW_PAGE.encode(),
+            self._reply(200, _with_nav(PREVIEW_PAGE),
                         content_type="text/html; charset=utf-8")
         elif path == "/preview.jpg":
             self._serve_preview_jpeg()
         elif path == "/report":
-            self._reply(200, REPORT_PAGE.encode(),
+            self._reply(200, _with_nav(REPORT_PAGE),
                         content_type="text/html; charset=utf-8")
         elif path == "/report.json":
             self._serve_report_json()
+        elif path == "/login":
+            self._reply(200, _with_nav(LOGIN_PAGE),
+                        content_type="text/html; charset=utf-8")
+        elif path == "/history":
+            self._reply(200, _with_nav(HISTORY_PAGE),
+                        content_type="text/html; charset=utf-8")
+        elif path == "/history.json":
+            self._serve_history_json()
+        elif path == "/":
+            # 根路径直接进预览页, 保持原有访问习惯
+            self._reply(302, b"", extra_headers={"Location": "/preview"})
         else:
             self._reply(404, b'{"error":"not found"}')
+
+    def _serve_history_json(self):
+        """历史记录: 返回真实累积的学习记录, 按时间倒序。
+
+        数据来源是 HISTORY_PATH (JSONL), 每完成一局由 _append_history 追加一行。
+        历史为空时 (首次部署 / 还没跑过一局), 用固定的演示行兜底, 保证页面不空;
+        一旦有真实记录, 就只展示真实数据 —— 不把演示数据混进真实历史里。
+
+        想让演示重新显示固定数据: 清空历史文件, 或设 HISTORY_SEED_DEMO=0 关闭兜底。
+        """
+        items = _load_history()
+        if not items and HISTORY_SEED_DEMO:
+            items = demo_history()
+        items.sort(key=lambda x: x.get("ts", 0), reverse=True)
+        payload = json.dumps({"ok": True, "items": items},
+                             ensure_ascii=False).encode()
+        self._reply(200, payload, extra_headers={"Cache-Control": "no-store"})
 
     def _serve_report_json(self):
         try:
@@ -837,14 +1881,19 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
         sys.stderr.write("[relay] %s\n" % (fmt % args))
 
 
-    # 是否在无报告时预置演示数据 (设 0 关闭)
+def _with_nav(page):
+    """把顶部导航注入页面 (只在第一个 <body> 后插入, 不改动原有结构)。"""
+    return page.replace("<body>", "<body>" + NAV_HTML, 1).encode("utf-8")
+
+
+# 是否在无报告时预置演示数据 (设 0 关闭)
 SEED_DEMO_REPORT = os.environ.get("SEED_DEMO_REPORT", "1") != "0"
 
 # 预置演示数据的两个档位:
 #   normal —— 常规一局 (45 分钟 / 72 分 / 有分心), 解锁 4 项成就, 贴近真实使用
 #   hero   —— 高光一局 (65 分钟 / 93 分 / 几乎零分心), 解锁 8 项成就,
 #             专门用于现场演示"成就系统"
-# 切换: DEMO_PROFILE=hero python3 mimo_relay.py
+# 切换: DEMO_PROFILE=hero ./mimo_relay.py
 DEMO_PROFILES = {
     "normal": {
         "total_min": 45, "effective_min": 38,
@@ -904,14 +1953,15 @@ def main():
     print("[relay]   建议: MiMo %s (模型 %s)" % (MIMO_URL, MIMO_MODEL))
     print("[relay]   网页: http://<本机IP>:%d/preview  (实时画面)" % PORT)
     print("[relay]         http://<本机IP>:%d/report   (学习报告)" % PORT)
+    print("[relay]         http://<本机IP>:%d/login    (登录, 演示鉴权)" % PORT)
+    print("[relay]         http://<本机IP>:%d/history  (历史记录, 演示数据)" % PORT)
     if not MIMO_API_KEY:
         print("[relay] 警告: 未设置 MIMO_API_KEY, 学习建议将用本地模板兜底")
     if RELAY_TOKEN:
         print("[relay] 已启用访问令牌校验 (设备需带 Authorization)")
     else:
         print("[relay] 警告: 未设置 RELAY_TOKEN, 不校验来源")
-    # 必须用多线程: 单线程 HTTPServer 在 MiMo 慢请求时无法 accept 新连接,
-    # 内核接收队列积压满后直接丢弃 SYN (真机表现为连接超时 / 网络不通)。
+
     # 预置演示报告: 设备未上传时网页也有内容 (评委打开就能看到).
     # 删除 REPORT_JSON_PATH 即可重新生成; 设备真实上报后会被覆盖。
     if SEED_DEMO_REPORT and not os.path.exists(REPORT_JSON_PATH):
@@ -920,6 +1970,8 @@ def main():
         except Exception as e:  # noqa: BLE001
             print("[relay] 预置演示报告失败: %s" % e)
 
+    # 必须用多线程: 单线程 HTTPServer 在 MiMo 慢请求时无法 accept 新连接,
+    # 内核接收队列积压满后直接丢弃 SYN (真机表现为连接超时 / 网络不通)。
     http.server.ThreadingHTTPServer(("0.0.0.0", PORT), RelayHandler).serve_forever()
 
 
