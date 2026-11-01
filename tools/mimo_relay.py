@@ -99,6 +99,48 @@ def _score_grade(score):
     return "需努力"
 
 
+def compute_achievements(stats, distraction_by_type):
+    """根据本局统计计算成就。
+
+    返回**全部**成就（含未解锁），由前端区分"已获得 / 待解锁"——
+    只返回已获得的会让新用户看到空板块，展示效果差。
+
+    阈值留出梯度：常规一局能拿 3~5 项，90 分 / 60 分钟 / 零分心属于挑战项。
+    判据全部来自设备实际上报的四项统计（总时长、有效时长、专注度、分类分心次数），
+    不引入额外数据源，设备固件无需改动。
+    """
+    total_min = int(stats.get("total_min", 0))
+    eff_min = int(stats.get("effective_min", 0))
+    score = int(stats.get("focus_score", 0))
+
+    d = list(distraction_by_type or [0, 0, 0, 0])[:4]
+    d += [0] * (4 - len(d))
+    playing, glancing, away, drowsy = d[0], d[1], d[2], d[3]
+    total_dist = playing + glancing + away + drowsy
+    ratio = (float(eff_min) / total_min) if total_min > 0 else 0.0
+
+    return [
+        {"id": "first_session", "name": "首战告捷", "desc": "完成一次专注监测",
+         "tier": "bronze", "unlocked": True},
+        {"id": "persistent", "name": "坚毅前行", "desc": "单次学习 ≥ 40 分钟",
+         "tier": "bronze", "unlocked": total_min >= 40},
+        {"id": "stay_seated", "name": "稳坐如山", "desc": "全程没有离座",
+         "tier": "bronze", "unlocked": away == 0},
+        {"id": "steady_focus", "name": "稳扎稳打", "desc": "专注度 ≥ 70 分",
+         "tier": "silver", "unlocked": score >= 70},
+        {"id": "efficient", "name": "高效学习者", "desc": "有效学习占比 ≥ 80%",
+         "tier": "silver", "unlocked": ratio >= 0.80},
+        {"id": "phone_free", "name": "手机绝缘体", "desc": "全程没有玩手机",
+         "tier": "silver", "unlocked": playing == 0},
+        {"id": "deep_focus", "name": "心流时刻", "desc": "专注度 ≥ 90 分",
+         "tier": "gold", "unlocked": score >= 90},
+        {"id": "marathon", "name": "马拉松学霸", "desc": "单次学习 ≥ 60 分钟",
+         "tier": "gold", "unlocked": total_min >= 60},
+        {"id": "flawless", "name": "无暇可分", "desc": "整局零分心",
+         "tier": "gold", "unlocked": total_dist == 0},
+    ]
+
+
 def _local_advice(stats, mode="strict"):
     """MiMo 不可用时的兜底建议 (规则模板, 保证网页/设备总有内容)。"""
     eff = int(stats.get("effective_min", 0))
@@ -275,6 +317,21 @@ REPORT_PAGE = """<!DOCTYPE html>
   .tab.active{background:#00c853;color:#04120a;border-color:#00c853;
               font-weight:600}
   #tab_gentle.active{background:#ffb300;border-color:#ffb300}
+  /* ---- 成就 ---- */
+  h2.ach-h{margin-top:24px}
+  .ach-sum{color:#91a0b5;font-size:12px;margin:-4px 0 12px}
+  .ach{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .badge{background:#0f1a2b;border:1px solid #22304a;border-radius:10px;
+         padding:12px 8px;text-align:center;opacity:.38;transition:.2s}
+  .badge.on{opacity:1;background:#0e2118;border-color:#2f7d4f}
+  .badge .ico{font-size:24px;line-height:1.1;filter:grayscale(1)}
+  .badge.on .ico{filter:none}
+  .badge .nm{font-size:13px;font-weight:600;margin-top:6px}
+  .badge .ds{font-size:11px;color:#91a0b5;margin-top:3px;line-height:1.4}
+  .badge.t-gold.on{border-color:#ffb300;
+                   box-shadow:0 0 0 1px rgba(255,179,0,.28) inset}
+  .badge.t-silver.on{border-color:#9fb3c8}
+  .badge.t-bronze.on{border-color:#cd7f32}
 </style>
 </head>
 <body>
@@ -295,6 +352,9 @@ REPORT_PAGE = """<!DOCTYPE html>
     <button class="tab" id="tab_gentle" onclick="pick('gentle')">鼓励模式</button>
   </div>
   <div class="advice" id="advice">加载中...</div>
+  <h2 class="ach-h">本次专注获得成就如下</h2>
+  <div class="ach-sum" id="achsum"></div>
+  <div class="ach" id="ach"></div>
   <div class="foot" id="foot"></div>
 </div>
 <script>
@@ -311,6 +371,24 @@ function pick(m){
   document.getElementById('tab_gentle').className =
     'tab' + (m === 'gentle' ? ' active' : '');
   document.getElementById('advice').textContent = ADV[m] || '(暂无建议)';
+}
+var ACH_ICON = {first_session:'🎯', persistent:'⏳', stay_seated:'🪑',
+                steady_focus:'📈', efficient:'⚡', phone_free:'📵',
+                deep_focus:'🌊', marathon:'🏅', flawless:'💎'};
+function renderAch(list){
+  var box = document.getElementById('ach');
+  var sumEl = document.getElementById('achsum');
+  if (!list || !list.length){ box.innerHTML = ''; sumEl.textContent = ''; return; }
+  var got = 0;
+  for (var i = 0; i < list.length; i++) if (list[i].unlocked) got++;
+  sumEl.textContent = '本局解锁 ' + got + ' / ' + list.length + ' 项';
+  box.innerHTML = list.map(function(a){
+    return '<div class="badge t-' + (a.tier || 'bronze') +
+           (a.unlocked ? ' on' : '') + '">' +
+           '<div class="ico">' + (ACH_ICON[a.id] || '🏆') + '</div>' +
+           '<div class="nm">' + a.name + '</div>' +
+           '<div class="ds">' + a.desc + '</div></div>';
+  }).join('');
 }
 function load(){
   fetch('/report.json?t='+Date.now()).then(function(r){
@@ -334,9 +412,11 @@ function load(){
     document.getElementById('advice').textContent = ADV[CUR] || '(暂无建议)';
     document.getElementById('foot').textContent =
       '分心合计 ' + (s.distraction_count||0) + ' 次';
+    renderAch(d.achievements);
   }).catch(function(){
     document.getElementById('hdr').textContent = '暂无报告 (完成一次学习后自动生成)';
     document.getElementById('advice').textContent = '等待设备上传学习数据...';
+    renderAch([]);
   });
 }
 load();
@@ -516,6 +596,8 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
             "advice": advice,
             "advice_gentle": advice_gentle,
             "grade": _score_grade(int(stats.get("focus_score", 0))),
+            "achievements": compute_achievements(
+                stats, stats.get("distractions") or [0, 0, 0, 0]),
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -758,12 +840,25 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
     # 是否在无报告时预置演示数据 (设 0 关闭)
 SEED_DEMO_REPORT = os.environ.get("SEED_DEMO_REPORT", "1") != "0"
 
-# 预置用的示例学习数据 (一局 45 分钟)
-DEMO_STATS = {
-    "total_min": 45, "effective_min": 38,
-    "distractions": [3, 2, 1, 0],          # 玩/看/离座/瞌睡
-    "focus_score": 72, "mode": "strict",
+# 预置演示数据的两个档位:
+#   normal —— 常规一局 (45 分钟 / 72 分 / 有分心), 解锁 4 项成就, 贴近真实使用
+#   hero   —— 高光一局 (65 分钟 / 93 分 / 几乎零分心), 解锁 8 项成就,
+#             专门用于现场演示"成就系统"
+# 切换: DEMO_PROFILE=hero python3 mimo_relay.py
+DEMO_PROFILES = {
+    "normal": {
+        "total_min": 45, "effective_min": 38,
+        "distractions": [3, 2, 1, 0],          # 玩/看/离座/瞌睡
+        "focus_score": 72, "mode": "strict",
+    },
+    "hero": {
+        "total_min": 65, "effective_min": 62,
+        "distractions": [0, 1, 0, 0],
+        "focus_score": 93, "mode": "strict",
+    },
 }
+DEMO_PROFILE = os.environ.get("DEMO_PROFILE", "normal")
+DEMO_STATS = DEMO_PROFILES.get(DEMO_PROFILE, DEMO_PROFILES["normal"])
 
 
 def _seed_demo_report():
@@ -782,14 +877,17 @@ def _seed_demo_report():
         "advice": generate_advice(stats, "strict"),
         "advice_gentle": generate_advice(stats, "gentle"),
         "grade": _score_grade(stats["focus_score"]),
+        "achievements": compute_achievements(stats, stats["distractions"]),
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S") + " (演示数据)",
     }
     tmp = REPORT_JSON_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False)
     os.replace(tmp, REPORT_JSON_PATH)
-    print("[relay] 已预置演示报告: 严格 %d 字 / 鼓励 %d 字"
-          % (len(report["advice"]), len(report["advice_gentle"])))
+    got = sum(1 for a in report["achievements"] if a["unlocked"])
+    print("[relay] 已预置演示报告 (profile=%s): 成就 %d/%d, 严格 %d 字 / 鼓励 %d 字"
+          % (DEMO_PROFILE, got, len(report["achievements"]),
+             len(report["advice"]), len(report["advice_gentle"])))
 
 
 def main():
