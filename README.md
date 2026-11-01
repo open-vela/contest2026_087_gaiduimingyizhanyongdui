@@ -466,6 +466,12 @@ curl -s -m 8 http://127.0.0.1:8001/health
 | `/report.json` | GET | 报告数据（网页 JS 拉取，含 `advice` / `advice_gentle` / `achievements`） |
 | `/preview` | GET | 摄像头实时预览网页 |
 | `/preview.jpg` | GET | 最新一帧画面 |
+| `/history` | GET | 历史学习记录网页（近 7 天趋势、平均分、累计时长） |
+| `/history.json` | GET | 历史记录数据（真实累积记录；为空时用固定演示数据兜底） |
+| `/login` · `/api/login` | GET / POST | 登录页（**纯前端演示，无真实鉴权**） |
+| `/` | GET | 302 → `/preview` |
+
+所有页面共用同一套顶部导航（`/preview` `/report` `/history` `/login`）。
 
 **协议转换由中继完成**（设备发 OpenAI 格式，视觉模型是 multipart 表单且字段名不同），
 因此**设备固件无需感知后端模型**，换模型只改中继。
@@ -500,6 +506,31 @@ DEMO_PROFILE=hero python3 tools/mimo_relay.py    # hero  : 65 分钟 / 93 分 �
 ```
 
 `hero` 档刻意保留「无暇可分」未解锁，演示时可指着说"还差一个：整局零分心"。
+
+### 历史记录（真实持久化）
+
+`/history` 展示**真实的历次学习记录**，不是演示数据：
+
+- 每完成一局，设备 `POST /report` → 中继生成建议后，把本局摘要追加到
+  `HISTORY_PATH`（默认 `/tmp/focus_history.jsonl`，一行一条）
+- `/history.json` 从该文件读取并按时间倒序返回；网页据此绘制近 7 天趋势、
+  平均分、累计时长
+- **去重**：设备失败会重发 `/report`，因此内容相同且间隔 < 60 s 的重复上报不会记两条
+- **容量**：超过 `HISTORY_MAX_ROWS`（默认 500）后自动丢弃最旧的
+
+与 `REPORT_JSON_PATH`（只存"最新一局"）分开存放：
+
+| 文件 | 作用 |
+|---|---|
+| `/tmp/report.json` | 最新一局的完整报告（含建议正文），供 `/report` 页 |
+| `/tmp/focus_history.jsonl` | 历次学习记录摘要（含成就解锁数），供 `/history` 页 |
+
+**演示兜底**：历史为空时（首次部署、还没跑过一局），用 `HISTORY_SEED_ROWS`
+的固定演示数据填充，保证页面不空。一旦有真实记录就只显示真实数据，不混入演示行。
+想让演示重新看到固定数据，清空历史文件即可；设 `HISTORY_SEED_DEMO=0` 可关闭兜底。
+
+> ⚠️ 登录页 `/login` 是**纯前端演示**，没有真实鉴权——任何访问者都能看到所有页面，
+> 仅用于展示产品形态。设备侧的 `/report` 与识图接口仍受 `RELAY_TOKEN` 保护。
 
 ## 七、主机单元测试
 
