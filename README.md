@@ -374,6 +374,19 @@ nohup python3 /root/mimo_relay.py > /root/relay.log 2>&1 &
 > `MIMO_API_KEY` 仅用于**学习报告的建议生成**，可不填（会退回本地模板文案），
 > 不影响识图功能。
 
+**关于模型名**：由 `MIMO_MODEL` 指定，默认 **`mimo-v2.6-flash`**。
+
+- MiMo 已于 2026-11 **下线 `mimo-v2.5`** —— 再请求它会返回
+  `400 Unsupported model`，中继会因此静默退回本地模板（建议正文不再是 LLM 生成的）。
+  老部署升级时请确认 `MIMO_MODEL` 已改。
+- v2.6 是**推理模型**：默认先输出思考过程，`reasoning_tokens` 也计入
+  `max_completion_tokens`。本作品只要一段 50~100 字短建议，中继默认带
+  `thinking: {"type": "disabled"}` 关闭思考（实测 `reasoning_tokens = 0`，
+  建议质量不受影响、响应更快）。要恢复思考设 `MIMO_THINKING=enabled`。
+- 若服务端某天不接受 `thinking` 参数，中继会自动去掉它重试一次，不会因此整体失败。
+- 设备固件里的 `MIMO_MODEL` 常量不影响实际调用：中继在转发时会用
+  `MIMO_MODEL` 覆盖请求体里的 model 字段，**换模型不需要重烧固件**。
+
 #### 4.2 内网穿透：frp（服务器跑 frps，本机跑 frpc）
 
 **服务器侧**：

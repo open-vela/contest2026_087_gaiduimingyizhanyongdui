@@ -94,8 +94,50 @@ REPORT_PROMPT_GENTLE = (
 
 PORT = int(os.environ.get("PORT", "8600"))
 
-# 生成学习建议用的文字模型 (MiMo, OpenAI 兼容); 与应用层识图用的模型无关
-MIMO_MODEL = os.environ.get("MIMO_MODEL", "mimo-v2.5")
+# 生成学习建议用的文字模型 (MiMo, OpenAI 兼容); 与应用层识图用的模型无关。
+# MiMo 已下线 mimo-v2.5 (请求返回 400 Unsupported model), 现役为
+# mimo-v2.6-flash / mimo-v2.6-pro。本作品只要一段 50~100 字短建议,
+# flash 足够且更快更省。
+MIMO_MODEL = os.environ.get("MIMO_MODEL", "mimo-v2.6-flash")
+
+# 新模型 (v2.6) 是推理模型: 默认先输出思考过程, reasoning_tokens 也计入
+# max_completion_tokens。短建议用不上思考, 关掉它 —— 实测 thinking=disabled
+# 时 reasoning_tokens = 0, 建议质量不受影响, 响应也更快。
+# 若某天该参数不被接受, _mimo_post() 会自动去掉它重试一次。
+MIMO_THINKING = os.environ.get("MIMO_THINKING", "disabled")
+
+
+def _mimo_body(model, max_tokens, messages):
+    """构造 MiMo 请求体 (统一处理思考开关)。"""
+    body = {"model": model, "max_completion_tokens": max_tokens,
+            "messages": messages}
+    if MIMO_THINKING == "disabled":
+        body["thinking"] = {"type": "disabled"}
+    return body
+
+
+def _mimo_post(body, timeout=60):
+    """POST 到 MiMo 并返回解析后的 JSON。
+
+    若服务端不接受 thinking 参数 (400), 去掉后重试一次 —— 避免因为一个
+    可选参数把整条建议链路打挂。
+    """
+    def _send(payload):
+        req = urllib.request.Request(
+            MIMO_URL, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer " + MIMO_API_KEY})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    try:
+        return _send(body)
+    except urllib.error.HTTPError as e:
+        if "thinking" in body and e.code == 400:
+            retry = {k: v for k, v in body.items() if k != "thinking"}
+            print("[relay] MiMo 拒绝 thinking 参数, 去掉后重试")
+            return _send(retry)
+        raise
 
 
 def _at(seq, i):
@@ -1280,23 +1322,14 @@ def generate_advice(stats, mode="strict"):
            stats.get("focus_score", 0),
            "严格" if stats.get("mode") == "strict" else "鼓励")
     )
-    req_body = json.dumps({
-        "model": MIMO_MODEL,
-        "max_completion_tokens": 512,
-        "messages": [
-            {"role": "system", "content": "You are MiMo, an AI assistant "
-                                          "developed by Xiaomi."},
-            {"role": "user", "content": prompt + "\n\n" + user_text},
-        ],
-    }).encode()
+    body = _mimo_body(MIMO_MODEL, 1024, [
+        {"role": "system", "content": "You are MiMo, an AI assistant "
+                                      "developed by Xiaomi."},
+        {"role": "user", "content": prompt + "\n\n" + user_text},
+    ])
 
     try:
-        req = urllib.request.Request(
-            MIMO_URL, data=req_body,
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + MIMO_API_KEY})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
+        data = _mimo_post(body, timeout=60)
         content = (data["choices"][0]["message"].get("content") or "").strip()
         if content:
             return content
@@ -1526,17 +1559,22 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
                 payload = self._to_openai_response(result)
                 self._reply(200, payload)
             else:
-                req = urllib.request.Request(
-                    MIMO_URL,
-                    data=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": "Bearer " + MIMO_API_KEY,
-                    },
-                )
+                # 直连 MiMo 的兜底路径 (未配置 DETECT_URL 时)。
+                # 设备请求体里的 model 可能是已下线的旧名字 (如 mimo-v2.5),
+                # 统一以中继的 MIMO_MODEL 为准, 并套用思考开关。
                 try:
-                    with urllib.request.urlopen(req, timeout=90) as resp:
-                        self._reply(resp.status, resp.read())
+                    fwd = json.loads(body.decode("utf-8", "replace"))
+                    if not isinstance(fwd, dict):
+                        raise ValueError("body is not an object")
+                except Exception:  # noqa: BLE001
+                    fwd = {"messages": []}
+                fwd["model"] = MIMO_MODEL
+                if MIMO_THINKING == "disabled":
+                    fwd["thinking"] = {"type": "disabled"}
+                try:
+                    data = _mimo_post(fwd, timeout=90)
+                    self._reply(200, json.dumps(data, ensure_ascii=False)
+                                .encode("utf-8"))
                 except urllib.error.HTTPError as e:
                     self._reply(e.code, e.read())
 
